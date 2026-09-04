@@ -35,20 +35,26 @@ const PLAN_DAYS = 90;
 /* ------------------------------------------------------------------ */
 /*  工具函式                                                           */
 /* ------------------------------------------------------------------ */
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const pad2 = (n) => String(n).padStart(2, "0");
+const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
 const uid = () => Math.random().toString(36).slice(2, 10);
 const r0 = (n) => Math.round(n || 0);
 
+// 一律以「本地日期」解析,避免 new Date("YYYY-MM-DD") 被當成 UTC 造成跨時區差一天
+function parseLocal(s) {
+  const [y, m, d] = String(s).slice(0, 10).split("-").map(Number);
+  return new Date(y, (m || 1) - 1, d || 1);
+}
 function daysBetween(a, b) {
-  return Math.round((new Date(b) - new Date(a)) / 86400000);
+  return Math.round((parseLocal(b) - parseLocal(a)) / 86400000);
 }
 function addDays(dateStr, n) {
-  const d = new Date(dateStr);
+  const d = parseLocal(dateStr);
   d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 function fmtDate(dateStr) {
-  const d = new Date(dateStr);
+  const d = parseLocal(dateStr);
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
@@ -1168,12 +1174,14 @@ function DeficitMeter({ deficit, target, consumed, burned, tdee }) {
 }
 const Sep = () => <span style={{ fontSize: 20, color: "rgba(255,255,255,.4)", fontWeight: 700 }}>:</span>;
 function Countdown({ startDate, calRemaining }) {
-  const end = useMemo(() => { const d = new Date(startDate); d.setDate(d.getDate() + PLAN_DAYS); d.setHours(0, 0, 0, 0); return d; }, [startDate]);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
-  const ms = Math.max(0, end - now);
-  const days = Math.floor(ms / 86400000);
-  const hrs = Math.floor((ms % 86400000) / 3600000);
+  const elapsed = Math.max(0, daysBetween(startDate, todayStr()));
+  const daysLeft = Math.max(0, PLAN_DAYS - elapsed);
+  const d = new Date(now);
+  const nextMid = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0);
+  const ms = Math.max(0, nextMid - now);
+  const hrs = Math.floor(ms / 3600000);
   const mins = Math.floor((ms % 3600000) / 60000);
   const secs = Math.floor((ms % 60000) / 1000);
   const over = calRemaining < 0;
@@ -1187,7 +1195,7 @@ function Countdown({ startDate, calRemaining }) {
     <div style={{ background: C.ink, borderRadius: 16, padding: "16px 18px", marginBottom: 16 }}>
       <div style={{ fontSize: 13, color: "rgba(255,255,255,.75)", marginBottom: 12 }}>距離目標達成</div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 4px" }}>
-        {box(days, "天")}<Sep />{box(hrs, "時")}<Sep />{box(mins, "分")}<Sep />{box(secs, "秒")}
+        {box(daysLeft, "天")}<Sep />{box(hrs, "時")}<Sep />{box(mins, "分")}<Sep />{box(secs, "秒")}
       </div>
       <div style={{ borderTop: "1px solid rgba(255,255,255,.15)", marginTop: 14, paddingTop: 12, display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
         <span style={{ fontSize: 13, color: "rgba(255,255,255,.75)" }}>今天還可以吃</span>
@@ -1805,6 +1813,24 @@ export default function App() {
     const id = setInterval(tick, 30000);
     return () => clearInterval(id);
   }, [profile?.reminderOn, profile?.reminderTime]);
+
+  // 跨日守衛:過了午夜自動跳到新日期(若正停在「今天」)
+  useEffect(() => {
+    let cur = todayStr();
+    const check = () => {
+      const t = todayStr();
+      if (t !== cur) { const prev = cur; cur = t; setSelDate((s) => (s === prev ? t : s)); }
+    };
+    const onVis = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") check(); };
+    const id = setInterval(check, 15000);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVis);
+    if (typeof window !== "undefined") window.addEventListener("focus", check);
+    return () => {
+      clearInterval(id);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVis);
+      if (typeof window !== "undefined") window.removeEventListener("focus", check);
+    };
+  }, []);
 
   const saveProfile = (p) => { setProfile(p); store.set("profile", p); setEditing(false); };
   const updateProfile = (patch) => { const p = { ...profile, ...patch }; setProfile(p); store.set("profile", p); };
