@@ -334,6 +334,35 @@ function getUid() {
 function setUid(v) {
   try { localStorage.setItem("nutri:uid", (v || "").trim()); } catch {}
 }
+
+/* 待傳佇列:雲端寫入失敗時暫存,恢復連線後補傳,避免資料只留在本機而遺失 */
+const PENDING_KEY = "nutri:pending";
+function loadPending() { try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "{}"); } catch { return {}; } }
+function savePending(p) { try { localStorage.setItem(PENDING_KEY, JSON.stringify(p)); } catch {} }
+function emitSync() { try { window.dispatchEvent(new Event("nutri:sync")); } catch {} }
+async function pushCloud(uid, k, t) {
+  const r = await fetch(`${KV_URL}?u=${encodeURIComponent(uid)}&key=${encodeURIComponent(k)}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: t,
+  });
+  if (!r.ok) throw new Error("kv put failed " + r.status);
+}
+let flushing = false;
+async function flushPending() {
+  const uid = getUid();
+  if (!uid || flushing) return;
+  flushing = true;
+  try {
+    const p = loadPending();
+    for (const k of Object.keys(p)) {
+      try { await pushCloud(uid, k, p[k]); delete p[k]; savePending(p); emitSync(); } catch { /* 留待下次 */ }
+    }
+  } finally { flushing = false; }
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("online", flushPending);
+  setInterval(flushPending, 20000); // 每 20 秒嘗試補傳一次
+}
+
 const store = {
   async get(k) {
     const uid = getUid();
@@ -352,12 +381,13 @@ const store = {
     const uid = getUid();
     const t = JSON.stringify(v);
     try { localStorage.setItem(k, t); } catch {}
-    if (uid) {
-      try {
-        await fetch(`${KV_URL}?u=${encodeURIComponent(uid)}&key=${encodeURIComponent(k)}`, {
-          method: "PUT", headers: { "Content-Type": "application/json" }, body: t,
-        });
-      } catch {}
+    if (!uid) return;
+    try {
+      await pushCloud(uid, k, t);
+      emitSync();
+      flushPending(); // 順便補傳先前失敗的
+    } catch {
+      const p = loadPending(); p[k] = t; savePending(p); emitSync(); // 失敗就排隊,稍後自動重試
     }
   },
 };
@@ -478,6 +508,7 @@ const PROFILE_DEFAULTS = {
   sex: "male", age: 30, height: 170, startWeight: 75,
   activity: 1.375, startDate: todayStr(), targetLossKg: 10, dietDeficit: 500,
   equipment: ["stair", "treadmill", "spin", "trainer"],
+  reminderOn: false, reminderTime: "20:00",
 };
 function ProfileForm({ initial, onSave }) {
   const [f, setF] = useState(initial || { ...PROFILE_DEFAULTS });
@@ -753,26 +784,71 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const [qty, setQty] = useState(1);
+  const [batch, setBatch] = useState([]);
+  const [batchNote, setBatchNote] = useState("");
   const camRef = useRef(null);
   const libRef = useRef(null);
+  const miniStep = { width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, background: C.bg, color: C.ink, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: FONT, lineHeight: 1 };
+  const miniAdd = { background: C.ink, color: "#fff", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: FONT, flexShrink: 0 };
 
-  // 吃過的東西:依名稱去重,保留最近一次的營養值,依最近使用排序
+  async function handleLibrary(e) {
+    const all = Array.from(e.target.files || []);
+    if (!all.length) return;
+    const files = all.slice(0, 5);
+    setBatchNote(all.length > 5 ? "一次最多 5 張,已取前 5 張" : "");
+    const items = files.map((f) => ({ id: uid(), preview: URL.createObjectURL(f), file: f, status: "loading", data: null, qty: 1, added: false }));
+    setBatch(items); setPreview(null); setErr(""); setStatus("batch");
+    items.forEach((it) => {
+      (async () => {
+        try {
+          const b64 = await fileToBase64(it.file);
+          const mt = it.file.type || "image/jpeg";
+          const data = isFood ? await analyzeFood(b64, mt) : await analyzeExercise(b64, mt, profile.startWeight);
+          setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "done", data } : x)));
+        } catch {
+          setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "error" } : x)));
+        }
+      })();
+    });
+    e.target.value = "";
+  }
+  const setItemQty = (id, v) => setBatch((prev) => prev.map((x) => (x.id === id ? { ...x, qty: Math.max(1, v) } : x)));
+  const removeBatch = (id) => setBatch((prev) => prev.filter((x) => x.id !== id));
+  function addBatchItem(it) {
+    if (it.status !== "done") return;
+    const d = it.data;
+    if (isFood) {
+      const qn = it.qty || 1;
+      onAdd({ id: uid(), date: todayStr(), type: "food", name: qn > 1 ? `${d.food_name || "食物"} ×${qn}` : (d.food_name || "食物"), calories: r0(d.calories * qn), protein: r0(d.protein * qn), carbs: r0(d.carbs * qn), fat: r0(d.fat * qn) });
+    } else {
+      onAdd({ id: uid(), date: todayStr(), type: "exercise", name: d.activity || "運動", burned: r0(d.calories_burned), duration: r0(d.duration_min) });
+    }
+    setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, added: true } : x)));
+  }
+  const addAllBatch = () => { batch.forEach((it) => { if (it.status === "done" && !it.added) addBatchItem(it); }); onClose(); };
+
+  // 吃過的東西:依名稱累計次數,最常吃排最前(同次數則最近的優先),保留最近一次的營養值
   const history = useMemo(() => {
     if (!isFood) return [];
-    const seen = new Map();
-    for (let i = (entries || []).length - 1; i >= 0; i--) {
-      const e = entries[i];
-      if (e.type !== "food") continue;
+    const map = new Map();
+    (entries || []).forEach((e, idx) => {
+      if (e.type !== "food") return;
       const key = (e.name || "").replace(/\s*×\d+$/, "").trim(); // 去掉「×2」再比對
-      if (!key || seen.has(key)) continue;
-      seen.set(key, { food_name: key, calories: e.calories, protein: e.protein, carbs: e.carbs, fat: e.fat, portion: "上次紀錄", source: "history" });
-      if (seen.size >= 20) break;
-    }
-    return [...seen.values()];
+      if (!key) return;
+      const cur = map.get(key) || { food_name: key, count: 0, last: -1, portion: "上次紀錄", source: "history" };
+      cur.count += 1;
+      if (idx >= cur.last) { cur.last = idx; cur.calories = e.calories; cur.protein = e.protein; cur.carbs = e.carbs; cur.fat = e.fat; }
+      map.set(key, cur);
+    });
+    return [...map.values()].sort((a, b) => b.count - a.count || b.last - a.last).slice(0, 20);
   }, [entries, isFood]);
 
-  function pickHistory(item) {
-    setResult(item); setPreview(null); setQty(1); setErr(""); setStatus("result");
+  const [sel, setSel] = useState([]);
+  const toggleSel = (i) => setSel((prev) => (prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]));
+  function historyToBatch() {
+    if (!sel.length) return;
+    const items = sel.map((i) => ({ id: uid(), preview: null, status: "done", data: history[i], qty: 1, added: false }));
+    setBatch(items); setBatchNote(""); setPreview(null); setErr(""); setSel([]); setStatus("batch");
   }
 
   async function nameLookup() {
@@ -837,7 +913,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
         </div>
 
         <input ref={camRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
-        <input ref={libRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
+        <input ref={libRef} type="file" accept="image/*" multiple onChange={handleLibrary} style={{ display: "none" }} />
 
         {preview && (
           <img src={preview} alt="" style={{ width: "100%", height: 190, objectFit: "cover", borderRadius: 14, marginBottom: 16 }} />
@@ -850,7 +926,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <Btn onClick={() => camRef.current.click()} kind="accent"><Camera size={18} /> 拍照</Btn>
-              <Btn onClick={() => libRef.current.click()} kind="ghost"><ImageIcon size={18} /> 從相簿選</Btn>
+              <Btn onClick={() => libRef.current.click()} kind="ghost"><ImageIcon size={18} /> 從相簿選(可多張)</Btn>
               {isFood && (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "6px 0 2px" }}>
@@ -872,25 +948,33 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
             </div>
             {isFood && history.length > 0 && (
               <div style={{ marginTop: 20 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 8 }}>吃過的(點一下再選份數)</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 8 }}>吃過的(可勾選多樣一起帶入)</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
-                  {history.map((h, i) => (
-                    <button key={i} onClick={() => pickHistory(h)} style={{
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      background: C.card, border: `1px solid ${C.line}`, borderRadius: 12,
-                      padding: "11px 14px", cursor: "pointer", fontFamily: FONT, textAlign: "left",
-                    }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.food_name}</div>
-                        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>P{r0(h.protein)} · C{r0(h.carbs)} · F{r0(h.fat)}</div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                        <span style={{ fontSize: 14, fontWeight: 600, color: C.cal }}>{r0(h.calories)} kcal</span>
-                        <Plus size={16} color={C.sub} />
-                      </div>
-                    </button>
-                  ))}
+                  {history.map((h, i) => {
+                    const on = sel.includes(i);
+                    return (
+                      <button key={i} onClick={() => toggleSel(i)} style={{
+                        display: "flex", alignItems: "center", justifyContent: "space-between",
+                        background: on ? "#F1EFEA" : C.card, border: `1px solid ${on ? C.ink : C.line}`, borderRadius: 12,
+                        padding: "11px 14px", cursor: "pointer", fontFamily: FONT, textAlign: "left",
+                      }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.food_name}</div>
+                          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{h.count} 次 · P{r0(h.protein)} · C{r0(h.carbs)} · F{r0(h.fat)}</div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: C.cal }}>{r0(h.calories)} kcal</span>
+                          {on ? <Check size={16} color={C.ink} /> : <Plus size={16} color={C.sub} />}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
+                {sel.length > 0 && (
+                  <Btn kind="accent" onClick={historyToBatch} style={{ marginTop: 10 }}>
+                    <Check size={16} /> 帶入所選 {sel.length} 樣
+                  </Btn>
+                )}
               </div>
             )}
           </>
@@ -913,6 +997,55 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
           <ResultCard title={result.activity} sub={`約 ${r0(result.duration_min)} 分鐘`} confidence={result.confidence}
             rows={[["消耗熱量", `${r0(result.calories_burned)} kcal`]]}
             onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
+        )}
+
+        {status === "batch" && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <span style={{ fontSize: 13, color: C.sub }}>
+                逐項確認{isFood ? "、可調份數" : ""}
+                {batch.length ? ` · ${batch.filter((x) => x.added).length}/${batch.length} 已加入` : ""}
+              </span>
+              {batchNote && <span style={{ fontSize: 11.5, color: C.faint }}>{batchNote}</span>}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {batch.map((it) => (
+                <div key={it.id} style={{ display: "flex", gap: 12, alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 14, padding: 10, opacity: it.added ? 0.55 : 1 }}>
+                  {it.preview
+                    ? <img src={it.preview} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                    : <div style={{ width: 52, height: 52, borderRadius: 10, background: C.card, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Utensils size={20} color={C.faint} /></div>}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    {it.status === "loading" && <div style={{ fontSize: 13, color: C.sub, display: "flex", alignItems: "center", gap: 8 }}><Loader2 size={15} color={C.cal} style={{ animation: "spin 1s linear infinite" }} /> 分析中…</div>}
+                    {it.status === "error" && <div style={{ fontSize: 13, color: C.warn }}>分析失敗</div>}
+                    {it.status === "done" && (
+                      <>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isFood ? it.data.food_name : it.data.activity}</div>
+                        <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
+                          {isFood
+                            ? `${r0(it.data.calories * (it.qty || 1))} kcal · P${r0(it.data.protein * (it.qty || 1))} C${r0(it.data.carbs * (it.qty || 1))} F${r0(it.data.fat * (it.qty || 1))}`
+                            : `${r0(it.data.calories_burned)} kcal`}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {it.status === "done" && !it.added && isFood && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                      <button onClick={() => setItemQty(it.id, (it.qty || 1) - 1)} style={miniStep}>−</button>
+                      <span style={{ fontSize: 14, fontWeight: 700, minWidth: 16, textAlign: "center" }}>{it.qty || 1}</span>
+                      <button onClick={() => setItemQty(it.id, (it.qty || 1) + 1)} style={miniStep}>+</button>
+                    </div>
+                  )}
+                  {it.status === "done" && !it.added && <button onClick={() => addBatchItem(it)} style={miniAdd}>加入</button>}
+                  {it.added && <Check size={18} color={C.good} style={{ flexShrink: 0 }} />}
+                  {!it.added && <button onClick={() => removeBatch(it.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, flexShrink: 0 }}><Trash2 size={15} color={C.faint} /></button>}
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <Btn kind="ghost" onClick={addAllBatch}><Check size={16} /> 全部加入</Btn>
+              <Btn kind="primary" onClick={onClose}>完成</Btn>
+            </div>
+          </>
         )}
 
         {status === "manual" && (
@@ -1005,6 +1138,34 @@ function ManualForm({ isFood, onSubmit, err, init }) {
 /* ------------------------------------------------------------------ */
 /*  今天                                                               */
 /* ------------------------------------------------------------------ */
+function DeficitMeter({ deficit, target, consumed, burned, tdee }) {
+  const pct = target > 0 ? Math.max(0, Math.min(100, (deficit / target) * 100)) : 0;
+  const done = deficit >= target;
+  const gap = Math.round(target - deficit);
+  const over = Math.round(deficit - target);
+  return (
+    <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>今日減脂進度</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: done ? C.good : C.cal }}>{done ? "已達標 ✓" : `${Math.round(pct)}%`}</span>
+      </div>
+      <div style={{ height: 10, background: C.line, borderRadius: 99, overflow: "hidden" }}>
+        <div style={{ height: 10, width: `${pct}%`, background: done ? C.good : C.cal, borderRadius: 99, transition: "width .4s" }} />
+      </div>
+      <div style={{ fontSize: 13.5, color: C.sub, marginTop: 11, lineHeight: 1.5 }}>
+        {done
+          ? <>今天已製造 <b style={{ color: C.good }}>{Math.round(deficit)}</b> 大卡缺口{over > 0 ? `,超前 ${over} 大卡` : ""},很棒,守住!</>
+          : <>還差 <b style={{ color: C.cal }}>{gap}</b> 大卡達成今日目標 —— 少吃 {gap} 或再運動消耗 {gap} 都算。</>}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: C.faint, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.line}` }}>
+        <span>基礎消耗 {r0(tdee)}</span>
+        <span>已吃 {r0(consumed)}</span>
+        <span>運動 +{r0(burned)}</span>
+        <span>= 缺口 {r0(deficit)}</span>
+      </div>
+    </div>
+  );
+}
 const Sep = () => <span style={{ fontSize: 20, color: "rgba(255,255,255,.4)", fontWeight: 700 }}>:</span>;
 function Countdown({ startDate, calRemaining }) {
   const end = useMemo(() => { const d = new Date(startDate); d.setDate(d.getDate() + PLAN_DAYS); d.setHours(0, 0, 0, 0); return d; }, [startDate]);
@@ -1038,9 +1199,11 @@ function Countdown({ startDate, calRemaining }) {
     </div>
   );
 }
-function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak }) {
+function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, date, setDate, onEditEntry }) {
   const today = todayStr();
-  const todays = entries.filter((e) => e.date === today);
+  const viewDate = date || today;
+  const isToday = viewDate === today;
+  const todays = entries.filter((e) => e.date === viewDate);
   const foods = todays.filter((e) => e.type === "food");
   const exs = todays.filter((e) => e.type === "exercise");
 
@@ -1053,22 +1216,33 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak }
   const budget = plan.intakeTarget + burned; // 運動可換回一些額度
   const netDeficit = r0(plan.tdee - consumed + burned);
 
-  const dayNo = Math.max(1, daysBetween(profile.startDate, today) + 1);
+  const dayNo = Math.max(1, daysBetween(profile.startDate, viewDate) + 1);
+  const WD = ["日", "一", "二", "三", "四", "五", "六"][new Date(viewDate).getDay()];
+  const navBtn = (label, fn, disabled) => (
+    <button onClick={fn} disabled={disabled} style={{
+      width: 40, height: 40, borderRadius: 10, border: `1px solid ${C.line}`,
+      background: disabled ? C.card : C.bg, color: disabled ? C.faint : C.ink,
+      fontSize: 20, cursor: disabled ? "default" : "pointer", fontFamily: FONT, lineHeight: 1, flexShrink: 0,
+    }}>{label}</button>
+  );
 
   return (
     <div style={{ padding: "8px 18px 96px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "10px 0 16px" }}>
-        <div>
-          <div style={{ fontSize: 21, fontWeight: 700, color: C.ink }}>第 {dayNo} 天</div>
-          <div style={{ fontSize: 13, color: C.sub }}>{fmtDate(today)} · 目標剩 {Math.max(0, PLAN_DAYS - dayNo)} 天</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 16px" }}>
+        {navBtn("‹", () => setDate(addDays(viewDate, -1)), false)}
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: C.ink }}>{isToday ? "今天" : `${fmtDate(viewDate)}(週${WD})`}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>第 {dayNo} 天{isToday ? ` · 目標剩 ${Math.max(0, PLAN_DAYS - dayNo)} 天` : ""}</div>
         </div>
-        <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 21, fontWeight: 700, color: netDeficit >= plan.dailyDeficitNeeded ? C.good : C.cal }}>{netDeficit}</div>
-          <div style={{ fontSize: 12, color: C.sub }}>今日缺口/目標 {r0(plan.dailyDeficitNeeded)}</div>
-        </div>
+        {navBtn("›", () => setDate(addDays(viewDate, 1)), isToday)}
       </div>
+      {!isToday && (
+        <button onClick={() => setDate(today)} style={{ display: "block", margin: "0 auto 14px", background: "none", border: "none", color: C.cal, fontSize: 13, cursor: "pointer", fontFamily: FONT }}>回到今天</button>
+      )}
 
-      <Countdown startDate={profile.startDate} calRemaining={r0(budget - consumed)} />
+      {isToday && <Countdown startDate={profile.startDate} calRemaining={r0(budget - consumed)} />}
+
+      <DeficitMeter deficit={netDeficit} target={plan.dailyDeficitNeeded} consumed={consumed} burned={burned} tdee={plan.tdee} />
 
       {(streak.cur > 0 || streak.best > 0) && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.card, borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
@@ -1126,12 +1300,12 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak }
           {foods.length > 0 && <SectionLabel>飲食</SectionLabel>}
           {foods.map((e) => (
             <LogRow key={e.id} left={e.name} sub={`P${e.protein} · C${e.carbs} · F${e.fat}`}
-              right={`${e.calories} kcal`} rightColor={C.cal} onRemove={() => onRemove(e.id)} />
+              right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
           ))}
           {exs.length > 0 && <SectionLabel>運動</SectionLabel>}
           {exs.map((e) => (
             <LogRow key={e.id} left={e.name} sub={e.duration ? `${e.duration} 分鐘` : ""}
-              right={`-${e.burned} kcal`} rightColor={C.good} onRemove={() => onRemove(e.id)} />
+              right={`-${e.burned} kcal`} rightColor={C.good} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
           ))}
         </>
       )}
@@ -1141,14 +1315,14 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak }
 const SectionLabel = ({ children }) => (
   <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, margin: "16px 0 8px" }}>{children}</div>
 );
-function LogRow({ left, sub, right, rightColor, onRemove }) {
+function LogRow({ left, sub, right, rightColor, onClick, onRemove }) {
   return (
     <div style={{ display: "flex", alignItems: "center", padding: "12px 0", borderBottom: `1px solid ${C.line}` }}>
-      <div style={{ flex: 1 }}>
+      <div onClick={onClick} style={{ flex: 1, cursor: onClick ? "pointer" : "default" }}>
         <div style={{ fontSize: 15, color: C.ink, fontWeight: 500 }}>{left}</div>
         {sub && <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>{sub}</div>}
       </div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: rightColor, marginRight: 12 }}>{right}</div>
+      <div onClick={onClick} style={{ fontSize: 15, fontWeight: 600, color: rightColor, marginRight: 12, cursor: onClick ? "pointer" : "default" }}>{right}</div>
       <button onClick={onRemove} style={{ background: "none", border: "none", cursor: "pointer", padding: 4 }}>
         <Trash2 size={16} color={C.faint} />
       </button>
@@ -1304,7 +1478,7 @@ function Stat({ icon, label, val, unit }) {
 /* ------------------------------------------------------------------ */
 /*  我的                                                               */
 /* ------------------------------------------------------------------ */
-function Me({ profile, plan, onEdit }) {
+function Me({ profile, plan, onEdit, onUpdateProfile }) {
   return (
     <div style={{ padding: "8px 18px 96px" }}>
       <h1 style={{ fontSize: 21, fontWeight: 700, color: C.ink, margin: "12px 0 16px" }}>我的計畫</h1>
@@ -1333,9 +1507,45 @@ function Me({ profile, plan, onEdit }) {
         拍照估算為概略值(通常誤差 ±20-30%),請把它當作趨勢參考而非精確數字。體重會隨水分波動,建議每週固定時間量一次、看長期曲線。若有慢性病或特殊狀況,開始前請先諮詢醫師或營養師。
       </div>
 
+      <ReminderBox profile={profile} onUpdate={onUpdateProfile} />
+
       <SyncBox />
 
       <Btn onClick={onEdit} kind="ghost" style={{ marginTop: 12 }}><Pencil size={16} /> 修改個人資料與目標</Btn>
+    </div>
+  );
+}
+function ReminderBox({ profile, onUpdate }) {
+  const supported = typeof window !== "undefined" && "Notification" in window;
+  async function toggle() {
+    if (profile.reminderOn) { onUpdate({ reminderOn: false }); return; }
+    if (!supported) { alert("這個瀏覽器不支援通知。"); return; }
+    let perm = Notification.permission;
+    if (perm === "default") perm = await Notification.requestPermission();
+    if (perm === "granted") onUpdate({ reminderOn: true });
+    else alert("瀏覽器未允許通知,請到瀏覽器/系統設定開啟後再試。");
+  }
+  return (
+    <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>每日記錄提醒</div>
+        <button onClick={toggle} style={{
+          width: 52, height: 30, borderRadius: 99, border: "none", cursor: "pointer", position: "relative",
+          background: profile.reminderOn ? C.good : C.line, transition: "background .2s",
+        }}>
+          <span style={{ position: "absolute", top: 3, left: profile.reminderOn ? 25 : 3, width: 24, height: 24, borderRadius: 99, background: "#fff", transition: "left .2s" }} />
+        </button>
+      </div>
+      {profile.reminderOn && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+          <span style={{ fontSize: 13, color: C.sub }}>提醒時間</span>
+          <input type="time" value={profile.reminderTime || "20:00"} onChange={(e) => onUpdate({ reminderTime: e.target.value })}
+            style={{ ...inputStyle, width: "auto", flex: 1 }} />
+        </div>
+      )}
+      <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.6, marginTop: 12 }}>
+        到設定時間會跳一則通知提醒你記錄。需維持 App 在背景執行(手機建議「加入主畫面」);完全關閉 App 時可能不會觸發。
+      </div>
     </div>
   );
 }
@@ -1490,6 +1700,62 @@ function Suggest({ profile, entries, plan, weight, onAdd, onUpdateProfile, openS
   );
 }
 
+function SyncBadge() {
+  const [n, setN] = useState(0);
+  const [uid, setUidState] = useState(getUid());
+  useEffect(() => {
+    const update = () => { setN(Object.keys(loadPending()).length); setUidState(getUid()); };
+    update();
+    window.addEventListener("nutri:sync", update);
+    const t = setInterval(update, 5000);
+    return () => { window.removeEventListener("nutri:sync", update); clearInterval(t); };
+  }, []);
+  let color = C.faint, label = "僅存本機";
+  if (uid) { if (n > 0) { color = C.carbs; label = `待傳 ${n}`; } else { color = C.good; label = "已同步"; } }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ width: 8, height: 8, borderRadius: 99, background: color, display: "inline-block" }} />
+      <span style={{ fontSize: 12, color: C.sub }}>{label}</span>
+    </div>
+  );
+}
+
+function EditSheet({ entry, onSave, onDelete, onClose }) {
+  const isFood = entry.type === "food";
+  const [v, setV] = useState(
+    isFood
+      ? { name: entry.name || "", calories: entry.calories, protein: entry.protein, carbs: entry.carbs, fat: entry.fat }
+      : { name: entry.name || "", burned: entry.burned, duration: entry.duration || 0 }
+  );
+  const set = (k) => (e) => setV({ ...v, [k]: e.target.value });
+  function save() {
+    if (isFood) onSave({ name: v.name || "食物", calories: +v.calories || 0, protein: +v.protein || 0, carbs: +v.carbs || 0, fat: +v.fat || 0 });
+    else onSave({ name: v.name || "運動", burned: +v.burned || 0, duration: +v.duration || 0 });
+  }
+  return (
+    <Sheet title="編輯紀錄" onClose={onClose}>
+      <Field label={isFood ? "食物名稱" : "運動類型"}><input style={inputStyle} value={v.name} onChange={set("name")} /></Field>
+      {isFood ? (
+        <>
+          <Field label="熱量 kcal"><input type="number" style={inputStyle} value={v.calories} onChange={set("calories")} /></Field>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}><Field label="蛋白質 g"><input type="number" style={inputStyle} value={v.protein} onChange={set("protein")} /></Field></div>
+            <div style={{ flex: 1 }}><Field label="澱粉 g"><input type="number" style={inputStyle} value={v.carbs} onChange={set("carbs")} /></Field></div>
+            <div style={{ flex: 1 }}><Field label="脂肪 g"><input type="number" style={inputStyle} value={v.fat} onChange={set("fat")} /></Field></div>
+          </div>
+        </>
+      ) : (
+        <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ flex: 1 }}><Field label="消耗 kcal"><input type="number" style={inputStyle} value={v.burned} onChange={set("burned")} /></Field></div>
+          <div style={{ flex: 1 }}><Field label="分鐘"><input type="number" style={inputStyle} value={v.duration} onChange={set("duration")} /></Field></div>
+        </div>
+      )}
+      <Btn kind="accent" onClick={save} style={{ marginTop: 4 }}><Check size={18} /> 儲存變更</Btn>
+      <Btn kind="ghost" onClick={onDelete} style={{ marginTop: 8, color: C.warn }}><Trash2 size={16} /> 刪除這筆</Btn>
+    </Sheet>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  主程式                                                             */
 /* ------------------------------------------------------------------ */
@@ -1504,6 +1770,8 @@ export default function App() {
   const [bodyComp, setBodyComp] = useState([]);
   const [mealData, setMealData] = useState(null);
   const [bcOpen, setBcOpen] = useState(false);
+  const [selDate, setSelDate] = useState(todayStr()); // 目前檢視/記錄的日期
+  const [editEntry, setEditEntry] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1517,13 +1785,32 @@ export default function App() {
       if (Array.isArray(w)) setWeights(w);
       if (Array.isArray(bc)) setBodyComp(bc);
       setLoaded(true);
+      flushPending(); // 補傳先前離線時未上傳的變動
     })();
   }, []);
 
+  // 每日提醒:App 開啟時,到設定時間跳一次瀏覽器通知(當天只跳一次)
+  useEffect(() => {
+    if (!profile?.reminderOn) return;
+    const tick = () => {
+      if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      if (hhmm !== (profile.reminderTime || "20:00")) return;
+      let last = ""; try { last = localStorage.getItem("nutri:lastReminded") || ""; } catch {}
+      if (last === todayStr()) return;
+      try { localStorage.setItem("nutri:lastReminded", todayStr()); } catch {}
+      try { new Notification("Snap 熱量", { body: "記得記錄今天的飲食、運動與體重 💪" }); } catch {}
+    };
+    const id = setInterval(tick, 30000);
+    return () => clearInterval(id);
+  }, [profile?.reminderOn, profile?.reminderTime]);
+
   const saveProfile = (p) => { setProfile(p); store.set("profile", p); setEditing(false); };
   const updateProfile = (patch) => { const p = { ...profile, ...patch }; setProfile(p); store.set("profile", p); };
-  const addEntry = (en) => { const next = [...entries, en]; setEntries(next); store.set("entries", next); };
-  const removeEntry = (id) => { const next = entries.filter((e) => e.id !== id); setEntries(next); store.set("entries", next); };
+  const addEntry = (en) => setEntries((prev) => { const next = [...prev, { ...en, date: selDate }]; store.set("entries", next); return next; });
+  const removeEntry = (id) => setEntries((prev) => { const next = prev.filter((e) => e.id !== id); store.set("entries", next); return next; });
+  const updateEntry = (id, patch) => setEntries((prev) => { const next = prev.map((e) => (e.id === id ? { ...e, ...patch } : e)); store.set("entries", next); return next; });
   const addWeight = (rec) => {
     const next = [...weights.filter((x) => x.date !== rec.date), rec];
     setWeights(next); store.set("weights", next);
@@ -1563,15 +1850,16 @@ export default function App() {
 
   return (
     <Shell>
-      <div style={{ position: "sticky", top: 0, background: C.bg, borderBottom: `1px solid ${C.line}`, padding: "14px 18px", zIndex: 10 }}>
+      <div style={{ position: "sticky", top: 0, background: C.bg, borderBottom: `1px solid ${C.line}`, padding: "14px 18px", zIndex: 10, display: "flex", alignItems: "center" }}>
         <span style={{ fontSize: 16, fontWeight: 700, color: C.ink }}>Snap 熱量</span>
         <span style={{ fontSize: 13, color: C.faint, marginLeft: 8 }}>90 天減 {profile.targetLossKg} kg</span>
+        <div style={{ marginLeft: "auto" }}><SyncBadge /></div>
       </div>
 
-      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} />}
+      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} date={selDate} setDate={setSelDate} onEditEntry={setEditEntry} />}
       {tab === "suggest" && <Suggest profile={profile} entries={entries} plan={plan} weight={currentWeight} onAdd={addEntry} onUpdateProfile={updateProfile} openSheet={setSheet} />}
       {tab === "progress" && <Progress profile={profile} entries={entries} weights={weights} plan={plan} onAddWeight={addWeight} bodyComp={bodyComp} openBodyComp={() => setBcOpen(true)} />}
-      {tab === "me" && <Me profile={profile} plan={plan} onEdit={() => setEditing(true)} />}
+      {tab === "me" && <Me profile={profile} plan={plan} onEdit={() => setEditing(true)} onUpdateProfile={updateProfile} />}
 
       {/* 底部導覽 */}
       <div style={{
@@ -1591,6 +1879,7 @@ export default function App() {
       {sheet && <CaptureSheet mode={sheet} profile={profile} entries={entries} onAdd={addEntry} onClose={() => setSheet(null)} />}
       {mealData && <MealSheet remaining={mealData} onAdd={addEntry} onClose={() => setMealData(null)} />}
       {bcOpen && <BodyCompSheet profile={profile} plan={plan} previous={latestBodyComp} onSave={addBodyComp} onClose={() => setBcOpen(false)} />}
+      {editEntry && <EditSheet entry={editEntry} onSave={(patch) => { updateEntry(editEntry.id, patch); setEditEntry(null); }} onDelete={() => { removeEntry(editEntry.id); setEditEntry(null); }} onClose={() => setEditEntry(null)} />}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} *{-webkit-tap-highlight-color:transparent}`}</style>
     </Shell>
   );
