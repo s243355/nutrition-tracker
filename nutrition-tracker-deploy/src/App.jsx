@@ -98,8 +98,6 @@ async function claudeBlocks(content, tools) {
     body: JSON.stringify(body),
   });
   const data = await resp.json();
-  if (!resp.ok) throw new Error(data?.error?.message || data?.error || `API ${resp.status}`);
-  if (!Array.isArray(data.content)) throw new Error("AI 回應格式錯誤");
   return data.content.filter((i) => i.type === "text").map((i) => i.text);
 }
 function parseObj(blocks) {
@@ -330,31 +328,11 @@ async function suggestWorkoutsAI({ equipment, needKcal, weight, targetLossKg }) 
 const KV_URL =
   (typeof window !== "undefined" && window.__KV_ENDPOINT__ && window.__KV_ENDPOINT__.trim()) ||
   "/api/kv";
-const LS_PREFIX = "nutrition-tracker:";
-function localKey(k) { return `${LS_PREFIX}${k}`; }
-function getLocal(k) {
-  try {
-    const current = localStorage.getItem(localKey(k));
-    if (current != null) return JSON.parse(current);
-    // 相容先前版本使用的裸 key / nutri:uid key，避免升級後看不到舊資料。
-    const legacy = localStorage.getItem(k);
-    return legacy != null ? JSON.parse(legacy) : null;
-  } catch { return null; }
-}
-function setLocal(k, v) {
-  try { localStorage.setItem(localKey(k), JSON.stringify(v)); } catch {}
-}
 function getUid() {
-  try {
-    return localStorage.getItem(localKey("uid")) || localStorage.getItem("nutri:uid") || "";
-  } catch { return ""; }
+  try { return localStorage.getItem("nutri:uid") || ""; } catch { return ""; }
 }
 function setUid(v) {
-  try {
-    const value = (v || "").trim();
-    localStorage.setItem(localKey("uid"), value);
-    localStorage.setItem("nutri:uid", value); // 相容舊版
-  } catch {}
+  try { localStorage.setItem("nutri:uid", (v || "").trim()); } catch {}
 }
 const store = {
   async get(k) {
@@ -364,43 +342,25 @@ const store = {
         const r = await fetch(`${KV_URL}?u=${encodeURIComponent(uid)}&key=${encodeURIComponent(k)}`);
         if (r.ok) {
           const t = await r.text();
-          if (t) { setLocal(k, JSON.parse(t)); return JSON.parse(t); }
+          if (t) { try { localStorage.setItem(k, t); } catch {} return JSON.parse(t); }
         }
       } catch {}
     }
-    return getLocal(k);
+    try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return null; }
   },
   async set(k, v) {
     const uid = getUid();
-    setLocal(k, v);
+    const t = JSON.stringify(v);
+    try { localStorage.setItem(k, t); } catch {}
     if (uid) {
       try {
         await fetch(`${KV_URL}?u=${encodeURIComponent(uid)}&key=${encodeURIComponent(k)}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(v),
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: t,
         });
       } catch {}
     }
   },
 };
-async function uploadAllLocalToCloud() {
-  const uid = getUid();
-  if (!uid) return false;
-  const keys = ["profile", "entries", "weights", "bodycomp"];
-  await Promise.all(keys.map(async (k) => {
-    const v = getLocal(k);
-    if (v == null) return;
-    try {
-      await fetch(`${KV_URL}?u=${encodeURIComponent(uid)}&key=${encodeURIComponent(k)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(v),
-      });
-    } catch {}
-  }));
-  return true;
-}
 
 /* ------------------------------------------------------------------ */
 /*  小元件                                                             */
@@ -785,21 +745,41 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
 /* ------------------------------------------------------------------ */
 /*  拍照分析(食物 / 運動共用)                                        */
 /* ------------------------------------------------------------------ */
-function CaptureSheet({ mode, profile, onAdd, onClose }) {
+function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
   const isFood = mode === "food";
   const [status, setStatus] = useState("idle"); // idle | loading | result | error | manual
   const [preview, setPreview] = useState(null);
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
+  const [qty, setQty] = useState(1);
   const camRef = useRef(null);
   const libRef = useRef(null);
+
+  // 吃過的東西:依名稱去重,保留最近一次的營養值,依最近使用排序
+  const history = useMemo(() => {
+    if (!isFood) return [];
+    const seen = new Map();
+    for (let i = (entries || []).length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.type !== "food") continue;
+      const key = (e.name || "").replace(/\s*×\d+$/, "").trim(); // 去掉「×2」再比對
+      if (!key || seen.has(key)) continue;
+      seen.set(key, { food_name: key, calories: e.calories, protein: e.protein, carbs: e.carbs, fat: e.fat, portion: "上次紀錄", source: "history" });
+      if (seen.size >= 20) break;
+    }
+    return [...seen.values()];
+  }, [entries, isFood]);
+
+  function pickHistory(item) {
+    setResult(item); setPreview(null); setQty(1); setErr(""); setStatus("result");
+  }
 
   async function nameLookup() {
     const name = q.trim();
     if (!name) return;
     setPreview(null); setStatus("loading"); setErr("");
-    try { setResult(await analyzeFoodByName(name)); setStatus("result"); }
+    try { setResult(await analyzeFoodByName(name)); setQty(1); setStatus("result"); }
     catch { setErr("查詢失敗,可以改用手動輸入。"); setStatus("manual"); }
   }
 
@@ -816,6 +796,7 @@ function CaptureSheet({ mode, profile, onAdd, onClose }) {
         ? await analyzeFood(b64, mt)
         : await analyzeExercise(b64, mt, profile.startWeight);
       setResult(res);
+      setQty(1);
       setStatus("result");
     } catch (e2) {
       setErr("照片分析失敗,可以改用手動輸入。");
@@ -825,11 +806,13 @@ function CaptureSheet({ mode, profile, onAdd, onClose }) {
 
   function confirm() {
     if (isFood) {
+      const q = qty || 1;
+      const label = q > 1 ? `${result.food_name || "食物"} ×${q}` : (result.food_name || "食物");
       onAdd({
         id: uid(), date: todayStr(), type: "food",
-        name: result.food_name || "食物",
-        calories: r0(result.calories), protein: r0(result.protein),
-        carbs: r0(result.carbs), fat: r0(result.fat),
+        name: label,
+        calories: r0(result.calories * q), protein: r0(result.protein * q),
+        carbs: r0(result.carbs * q), fat: r0(result.fat * q),
       });
     } else {
       onAdd({
@@ -887,6 +870,29 @@ function CaptureSheet({ mode, profile, onAdd, onClose }) {
                 手動輸入
               </button>
             </div>
+            {isFood && history.length > 0 && (
+              <div style={{ marginTop: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 8 }}>吃過的(點一下再選份數)</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+                  {history.map((h, i) => (
+                    <button key={i} onClick={() => pickHistory(h)} style={{
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      background: C.card, border: `1px solid ${C.line}`, borderRadius: 12,
+                      padding: "11px 14px", cursor: "pointer", fontFamily: FONT, textAlign: "left",
+                    }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.food_name}</div>
+                        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>P{r0(h.protein)} · C{r0(h.carbs)} · F{r0(h.fat)}</div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                        <span style={{ fontSize: 14, fontWeight: 600, color: C.cal }}>{r0(h.calories)} kcal</span>
+                        <Plus size={16} color={C.sub} />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         )}
 
@@ -899,7 +905,8 @@ function CaptureSheet({ mode, profile, onAdd, onClose }) {
 
         {status === "result" && result && isFood && (
           <ResultCard title={result.food_name} sub={[result.portion, srcLabel(result.source)].filter(Boolean).join(" · ")} confidence={result.confidence}
-            rows={[["熱量", `${r0(result.calories)} kcal`], ["蛋白質", `${r0(result.protein)} g`], ["澱粉", `${r0(result.carbs)} g`], ["脂肪", `${r0(result.fat)} g`]]}
+            qty={qty} setQty={setQty}
+            rows={[["熱量", `${r0(result.calories * qty)} kcal`], ["蛋白質", `${r0(result.protein * qty)} g`], ["澱粉", `${r0(result.carbs * qty)} g`], ["脂肪", `${r0(result.fat * qty)} g`]]}
             onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
         )}
         {status === "result" && result && !isFood && (
@@ -917,13 +924,30 @@ function CaptureSheet({ mode, profile, onAdd, onClose }) {
   );
 }
 
-function ResultCard({ title, sub, rows, confidence, onConfirm, onRetry, onEdit }) {
+function ResultCard({ title, sub, rows, confidence, qty, setQty, onConfirm, onRetry, onEdit }) {
   const conf = { high: ["估算可信度高", C.good], medium: ["估算為概略值", C.carbs], low: ["照片較模糊,建議手動校正", C.warn] }[confidence] || ["", C.sub];
+  const stepBtn = (label, fn, disabled) => (
+    <button onClick={fn} disabled={disabled} style={{
+      width: 34, height: 34, borderRadius: 9, border: `1px solid ${C.line}`,
+      background: disabled ? C.card : C.bg, color: disabled ? C.faint : C.ink,
+      fontSize: 20, fontWeight: 600, cursor: disabled ? "default" : "pointer", fontFamily: FONT, lineHeight: 1,
+    }}>{label}</button>
+  );
   return (
     <div>
       <div style={{ background: C.card, borderRadius: 14, padding: 16, marginBottom: 14 }}>
         <div style={{ fontSize: 17, fontWeight: 700, color: C.ink }}>{title}</div>
         {sub && <div style={{ fontSize: 13, color: C.sub, marginTop: 2 }}>{sub}</div>}
+        {setQty && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+            <span style={{ fontSize: 14, color: C.sub }}>份數</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {stepBtn("−", () => setQty(Math.max(1, qty - 1)), qty <= 1)}
+              <span style={{ fontSize: 18, fontWeight: 700, color: C.ink, minWidth: 28, textAlign: "center" }}>{qty}</span>
+              {stepBtn("+", () => setQty(qty + 1))}
+            </div>
+          </div>
+        )}
         <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 9 }}>
           {rows.map(([k, v]) => (
             <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 15 }}>
@@ -1318,19 +1342,10 @@ function Me({ profile, plan, onEdit }) {
 function SyncBox() {
   const [code, setCode] = useState(getUid());
   const [saved, setSaved] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [uploaded, setUploaded] = useState(false);
   function save() {
     setUid(code.trim());
     setSaved(true);
-    setUploaded(false);
     setTimeout(() => window.location.reload(), 600); // 重新載入以拉取雲端資料
-  }
-  async function upload() {
-    if (!getUid()) return;
-    setUploading(true); setUploaded(false);
-    const ok = await uploadAllLocalToCloud();
-    setUploading(false); setUploaded(ok);
   }
   return (
     <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 4 }}>
@@ -1339,18 +1354,12 @@ function SyncBox() {
         自訂一組同步碼,手機和電腦填「一模一樣」的,資料就會共用同一份。留空則只存這台裝置。
       </div>
       <div style={{ display: "flex", gap: 8 }}>
-        <input value={code} onChange={(e) => { setCode(e.target.value); setSaved(false); setUploaded(false); }}
-          placeholder="例:rain-2026-xxxx" style={{ ...inputStyle, flex: 1 }} />
+        <input value={code} onChange={(e) => { setCode(e.target.value); setSaved(false); }}
+          placeholder="例:rain-2025-secret" style={{ ...inputStyle, flex: 1 }} />
         <button onClick={save} style={{ background: C.ink, color: "#fff", border: "none", borderRadius: 10, padding: "0 18px", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>
           {saved ? "已存" : "儲存"}
         </button>
       </div>
-      {getUid() && (
-        <button onClick={upload} disabled={uploading}
-          style={{ marginTop: 9, width: "100%", background: "#fff", color: C.ink, border: `1px solid ${C.line}`, borderRadius: 10, padding: "10px 12px", fontSize: 13, fontWeight: 600, cursor: uploading ? "default" : "pointer", fontFamily: FONT }}>
-          {uploading ? "上傳中…" : uploaded ? "已上傳此裝置資料" : "把此裝置資料上傳到雲端"}
-        </button>
-      )}
     </div>
   );
 }
@@ -1579,7 +1588,7 @@ export default function App() {
         ))}
       </div>
 
-      {sheet && <CaptureSheet mode={sheet} profile={profile} onAdd={addEntry} onClose={() => setSheet(null)} />}
+      {sheet && <CaptureSheet mode={sheet} profile={profile} entries={entries} onAdd={addEntry} onClose={() => setSheet(null)} />}
       {mealData && <MealSheet remaining={mealData} onAdd={addEntry} onClose={() => setMealData(null)} />}
       {bcOpen && <BodyCompSheet profile={profile} plan={plan} previous={latestBodyComp} onSave={addBodyComp} onClose={() => setBcOpen(false)} />}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} *{-webkit-tap-highlight-color:transparent}`}</style>
