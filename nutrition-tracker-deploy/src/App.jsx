@@ -559,6 +559,18 @@ function ProfileForm({ initial, onSave }) {
       </Field>
       <Field label="開始日期">
         <input type="date" style={inputStyle} value={f.startDate} onChange={set("startDate")} />
+        {(() => {
+          const el = Math.max(0, daysBetween(f.startDate, todayStr()));
+          const dayNo = el + 1, left = Math.max(0, PLAN_DAYS - el);
+          return (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+              <span style={{ fontSize: 12, color: C.sub }}>= 目前第 {dayNo} 天 · 剩 {left} 天</span>
+              {f.startDate !== todayStr() && (
+                <button onClick={() => setF({ ...f, startDate: todayStr() })} style={{ background: "none", border: "none", color: C.cal, fontSize: 12, cursor: "pointer", fontFamily: FONT }}>設為今天</button>
+              )}
+            </div>
+          );
+        })()}
       </Field>
       <Field label={`飲食缺口:每天少吃 ${f.dietDeficit} kcal(其餘靠運動補足)`}>
         <input type="range" min="300" max="750" step="50" value={f.dietDeficit}
