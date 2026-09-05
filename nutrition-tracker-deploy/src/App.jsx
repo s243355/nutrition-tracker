@@ -44,9 +44,17 @@ const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad2
 const uid = () => Math.random().toString(36).slice(2, 10);
 const r0 = (n) => Math.round(n || 0);
 const MEALS = ["早", "午", "晚", "點心"];
+// 依「記錄當下的時間」分餐:05:00–10:30 早、10:30–15:00 午、15:00–21:00 晚、其餘 點心
+function mealFromMinutes(m) {
+  if (m >= 300 && m < 630) return "早";
+  if (m >= 630 && m < 900) return "午";
+  if (m >= 900 && m < 1260) return "晚";
+  return "點心";
+}
+const nowHM = () => { const d = new Date(); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
 function currentMeal() {
-  const d = new Date(); const m = d.getHours() * 60 + d.getMinutes();
-  if (m < 630) return "早"; if (m < 900) return "午"; if (m < 1260) return "晚"; return "點心";
+  const d = new Date();
+  return mealFromMinutes(d.getHours() * 60 + d.getMinutes());
 }
 
 // 一律以「本地日期」解析,避免 new Date("YYYY-MM-DD") 被當成 UTC 造成跨時區差一天
@@ -179,8 +187,8 @@ async function analyzeBodyComp(base64, mediaType) {
     {
       type: "text",
       text:
-        "這是體脂計 App 的截圖。擷取畫面上的數據,沒有的欄位填 null。" +
-        '只回傳 JSON:{"weight":數字,"body_fat":數字(體脂率%),"muscle_mass":數字(肌肉量kg),"bmi":數字,"visceral_fat":數字(內臟脂肪),"body_water":數字(體水分%),"bmr":數字(基礎代謝kcal)}。',
+        "這是體脂計 App 的截圖。擷取畫面上的數據,沒有的欄位填 null。注意「骨骼肌」與「肌肉量」是兩個不同欄位,請分別填入、不要混用。" +
+        '只回傳 JSON:{"weight":數字,"body_fat":數字(體脂率%),"skeletal_muscle":數字(骨骼肌kg),"muscle_mass":數字(肌肉量kg),"bmi":數字,"visceral_fat":數字(內臟脂肪),"body_water":數字(體水分%),"bmr":數字(基礎代謝kcal)}。',
     },
   ]);
   return parseObj(blocks);
@@ -772,7 +780,7 @@ function fallbackTips(cur, prev) {
 function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
   const [phase, setPhase] = useState("idle"); // idle | loading | edit | saving | advice
   const [preview, setPreview] = useState(null);
-  const [d, setD] = useState({ weight: "", body_fat: "", muscle_mass: "", bmi: "", visceral_fat: "", body_water: "", bmr: "" });
+  const [d, setD] = useState({ weight: "", body_fat: "", skeletal_muscle: "", muscle_mass: "", bmi: "", visceral_fat: "", body_water: "", bmr: "" });
   const [advice, setAdvice] = useState([]);
   const camRef = useRef(null);
   const libRef = useRef(null);
@@ -785,7 +793,7 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
     try {
       const res = await analyzeBodyComp(await fileToBase64(file), file.type || "image/jpeg");
       setD({
-        weight: res.weight ?? "", body_fat: res.body_fat ?? "", muscle_mass: res.muscle_mass ?? "",
+        weight: res.weight ?? "", body_fat: res.body_fat ?? "", skeletal_muscle: res.skeletal_muscle ?? "", muscle_mass: res.muscle_mass ?? "",
         bmi: res.bmi ?? "", visceral_fat: res.visceral_fat ?? "", body_water: res.body_water ?? "", bmr: res.bmr ?? "",
       });
     } catch { /* 進入手動修正 */ }
@@ -794,7 +802,7 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
   async function save() {
     const rec = {
       date: todayStr(),
-      weight: +d.weight || null, body_fat: +d.body_fat || null, muscle_mass: +d.muscle_mass || null,
+      weight: +d.weight || null, body_fat: +d.body_fat || null, skeletal_muscle: +d.skeletal_muscle || null, muscle_mass: +d.muscle_mass || null,
       bmi: +d.bmi || null, visceral_fat: +d.visceral_fat || null, body_water: +d.body_water || null, bmr: +d.bmr || null,
     };
     setPhase("saving");
@@ -834,9 +842,9 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
         <>
           <p style={{ fontSize: 12.5, color: C.faint, margin: "0 0 12px" }}>確認或修正下列數字後儲存,只有的欄位會被記錄。</p>
           <div style={{ display: "flex", gap: 10 }}>{numField("weight", "體重", "kg")}{numField("body_fat", "體脂率", "%")}</div>
-          <div style={{ display: "flex", gap: 10 }}>{numField("muscle_mass", "肌肉量", "kg")}{numField("bmi", "BMI", "")}</div>
-          <div style={{ display: "flex", gap: 10 }}>{numField("visceral_fat", "內臟脂肪", "")}{numField("body_water", "體水分", "%")}</div>
-          {numField("bmr", "基礎代謝 BMR", "kcal")}
+          <div style={{ display: "flex", gap: 10 }}>{numField("skeletal_muscle", "骨骼肌", "kg")}{numField("muscle_mass", "肌肉量", "kg")}</div>
+          <div style={{ display: "flex", gap: 10 }}>{numField("visceral_fat", "內臟脂肪", "")}{numField("bmi", "BMI", "")}</div>
+          <div style={{ display: "flex", gap: 10 }}>{numField("body_water", "體水分", "%")}{numField("bmr", "BMR", "kcal")}</div>
           <Btn kind="accent" onClick={save} style={{ marginTop: 6 }}><Check size={18} /> 儲存並取得建議</Btn>
         </>
       )}
@@ -1501,7 +1509,7 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
                   <span style={{ fontSize: 12, color: C.faint }}>{cal} kcal</span>
                 </div>
                 {rows.map((e) => (
-                  <LogRow key={e.id} left={e.name} sub={`P${e.protein} · C${e.carbs} · F${e.fat}`}
+                  <LogRow key={e.id} left={e.name} sub={`${e.time ? e.time + " · " : ""}P${e.protein} · C${e.carbs} · F${e.fat}`}
                     right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
                 ))}
               </div>
@@ -1590,31 +1598,67 @@ function Progress({ profile, entries, weights, plan, onAddWeight, bodyComp, open
       {(() => {
         const bc = [...(bodyComp || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
         const latest = bc[bc.length - 1];
-        const fatData = bc.filter((x) => x.body_fat != null).map((x) => ({ date: fmtDate(x.date), 體脂: x.body_fat }));
+        const prev = bc.length > 1 ? bc[bc.length - 2] : null;
+        const fatMass = (x) => (x && x.weight != null && x.body_fat != null) ? (x.weight * x.body_fat / 100) : null;
+        const leanMass = (x) => (x && x.weight != null && fatMass(x) != null) ? (x.weight - fatMass(x)) : null;
+        const trend = bc.filter((x) => x.body_fat != null || x.muscle_mass != null)
+          .map((x) => ({ date: fmtDate(x.date), 體脂: x.body_fat ?? null, 肌肉: x.muscle_mass ?? null }));
+        const chart = trend.length > 1;
+        const dstat = (label, cur, unit, d, goodDown) => {
+          const c = d == null || d === 0 ? C.faint : (((d < 0) === goodDown) ? C.good : C.warn);
+          return (
+            <div style={{ flex: 1, textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: C.ink }}>{cur != null ? `${cur}${unit}` : "—"}</div>
+              <div style={{ fontSize: 11.5, color: C.sub, marginTop: 3 }}>{label}</div>
+              {d != null && d !== 0 && <div style={{ fontSize: 11, color: c, marginTop: 2 }}>{d < 0 ? "▼" : "▲"} {Math.abs(d).toFixed(1)}</div>}
+            </div>
+          );
+        };
+        const dfFat = (latest && prev && latest.body_fat != null && prev.body_fat != null) ? latest.body_fat - prev.body_fat : null;
+        const dfMus = (latest && prev && latest.muscle_mass != null && prev.muscle_mass != null) ? latest.muscle_mass - prev.muscle_mass : null;
+        const dfVis = (latest && prev && latest.visceral_fat != null && prev.visceral_fat != null) ? latest.visceral_fat - prev.visceral_fat : null;
+        const fmChange = (fatMass(latest) != null && fatMass(prev) != null) ? fatMass(latest) - fatMass(prev) : null;
+        const lmChange = (leanMass(latest) != null && leanMass(prev) != null) ? leanMass(latest) - leanMass(prev) : null;
         return (
           <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 22 }}>
             {latest ? (
-              <div style={{ display: "flex", gap: 10, marginBottom: fatData.length > 1 ? 14 : 4 }}>
-                <MiniStat label="體脂率" val={latest.body_fat != null ? `${latest.body_fat}%` : "—"} />
-                <MiniStat label="肌肉量" val={latest.muscle_mass != null ? `${latest.muscle_mass}kg` : "—"} />
-                <MiniStat label="內臟脂肪" val={latest.visceral_fat != null ? latest.visceral_fat : "—"} />
+              <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                {dstat("體脂率", latest.body_fat, "%", dfFat, true)}
+                {dstat("肌肉量", latest.muscle_mass, "kg", dfMus, false)}
+                {dstat("內臟脂肪", latest.visceral_fat, "", dfVis, true)}
               </div>
             ) : (
               <div style={{ fontSize: 13, color: C.faint, textAlign: "center", padding: "6px 0 14px" }}>還沒有體脂數據,拍一張截圖開始追蹤</div>
             )}
-            {fatData.length > 1 && (
-              <div style={{ height: 130, marginBottom: 12 }}>
+
+            {(fmChange != null || lmChange != null) && (
+              <div style={{ background: C.bg, border: `1px solid ${C.line}`, borderRadius: 12, padding: 12, marginBottom: 14, fontSize: 12.5, lineHeight: 1.6 }}>
+                <div style={{ fontWeight: 600, color: C.ink, marginBottom: 4 }}>減脂品質(距上次)</div>
+                {fmChange != null && <span style={{ color: fmChange <= 0 ? C.good : C.warn }}>脂肪量 {fmChange <= 0 ? "▼" : "▲"} {Math.abs(fmChange).toFixed(1)} kg　</span>}
+                {lmChange != null && <span style={{ color: lmChange >= 0 ? C.good : C.warn }}>淨體重(含肌肉) {lmChange >= 0 ? "▲" : "▼"} {Math.abs(lmChange).toFixed(1)} kg</span>}
+                <div style={{ color: C.faint, marginTop: 4 }}>
+                  {fmChange != null && fmChange < 0 && (lmChange == null || lmChange >= -0.2) ? "理想:減的是脂肪、肌肉守住了 👍" : "留意:別讓肌肉跟著掉,蛋白質吃夠、加阻力訓練。"}
+                </div>
+              </div>
+            )}
+
+            {chart && (
+              <div style={{ height: 150, marginBottom: 8 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={fatData} margin={{ top: 8, right: 8, left: -24, bottom: 0 }}>
+                  <LineChart data={trend} margin={{ top: 8, right: 4, left: -22, bottom: 0 }}>
                     <CartesianGrid stroke={C.line} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 10, fill: C.faint }} axisLine={false} tickLine={false} />
-                    <YAxis domain={["dataMin - 1", "dataMax + 1"]} tick={{ fontSize: 10, fill: C.faint }} axisLine={false} tickLine={false} />
+                    <YAxis yAxisId="l" domain={["dataMin - 1", "dataMax + 1"]} tick={{ fontSize: 10, fill: C.fat }} axisLine={false} tickLine={false} width={30} />
+                    <YAxis yAxisId="r" orientation="right" domain={["dataMin - 1", "dataMax + 1"]} tick={{ fontSize: 10, fill: C.protein }} axisLine={false} tickLine={false} width={30} />
                     <Tooltip contentStyle={{ borderRadius: 10, border: `1px solid ${C.line}`, fontSize: 12 }} />
-                    <Line type="monotone" dataKey="體脂" stroke={C.fat} strokeWidth={2.5} dot={{ r: 3, fill: C.fat }} />
+                    <Line yAxisId="l" type="monotone" dataKey="體脂" stroke={C.fat} strokeWidth={2.5} dot={{ r: 3, fill: C.fat }} connectNulls />
+                    <Line yAxisId="r" type="monotone" dataKey="肌肉" stroke={C.protein} strokeWidth={2.5} dot={{ r: 3, fill: C.protein }} connectNulls />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
             )}
+            {chart && <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 10 }}><span style={{ color: C.fat }}>● 體脂率 %</span>　<span style={{ color: C.protein }}>● 肌肉量 kg</span></div>}
+
             <Btn kind="ghost" onClick={openBodyComp}><Camera size={16} /> 拍體脂 App 截圖 / 更新</Btn>
           </div>
         );
@@ -1700,15 +1744,22 @@ function Me({ profile, plan, onEdit, onUpdateProfile }) {
     <div style={{ padding: "8px 18px 96px" }}>
       <h1 style={{ fontSize: 21, fontWeight: 700, color: C.ink, margin: "12px 0 16px" }}>我的計畫</h1>
       <div style={{ background: C.card, borderRadius: 16, padding: 18, marginBottom: 16 }}>
-        <PlanRow k="基礎代謝 BMR" v={`${r0(plan.bmr)} kcal`} />
+        <PlanRow k={`基礎代謝 BMR(${plan.bmrSource || "估算"})`} v={`${r0(plan.bmr)} kcal`} />
         <PlanRow k="每日總消耗 TDEE" v={`${r0(plan.tdee)} kcal`} />
-        <PlanRow k="每日建議攝取" v={`${r0(plan.intakeTarget)} kcal`} hi />
+        <PlanRow k="每日建議攝取" v={`${plan.intakeLow}–${plan.intakeHigh} kcal`} hi />
         <PlanRow k="每日運動目標" v={`${r0(plan.exerciseTarget)} kcal`} />
         <PlanRow k="每日目標總缺口" v={`${r0(plan.dailyDeficitNeeded)} kcal`} />
         <div style={{ height: 1, background: C.line, margin: "10px 0" }} />
-        <PlanRow k="建議蛋白質" v={`${r0(plan.proteinTarget)} g`} />
-        <PlanRow k="建議澱粉" v={`${r0(plan.carbTarget)} g`} />
-        <PlanRow k="建議脂肪" v={`${r0(plan.fatTarget)} g`} />
+        <PlanRow k="蛋白質" v={`${plan.proteinMin}–${plan.proteinMax} g`} hi />
+        <PlanRow k="脂肪" v={`${r0(plan.fatMin)}–${r0(plan.fatMax)} g`} />
+        <PlanRow k="澱粉(其餘)" v={`約 ${r0(plan.carbTarget)} g`} />
+        <PlanRow k="纖維" v={`≥ ${plan.fiberTarget} g`} />
+        <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.6, marginTop: 10 }}>
+          {plan.leanKg
+            ? `蛋白質以你的淨體重約 ${r0(plan.leanKg)} kg 計(2.0 g/kg,減脂保肌肉);上傳體脂後會更準。`
+            : "蛋白質以體重 1.8 g/kg 估;上傳體脂報表後改用淨體重計算會更準。"}
+          脂肪抓總熱量 20–30%,其餘給澱粉(可依口味彈性)。
+        </div>
       </div>
 
       {plan.tooAggressive && (
@@ -2055,7 +2106,15 @@ export default function App() {
 
   const saveProfile = (p) => { setProfile(p); store.set("profile", p); setEditing(false); };
   const updateProfile = (patch) => { const p = { ...profile, ...patch }; setProfile(p); store.set("profile", p); };
-  const stampEntry = (en) => ({ ...en, date: selDate, meal: en.type === "food" ? (en.meal || currentMeal()) : en.meal });
+  const stampEntry = (en) => {
+    const base = { ...en, date: selDate };
+    if (en.type === "food") {
+      const d = new Date();
+      base.time = en.time || `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+      base.meal = en.meal || mealFromMinutes(d.getHours() * 60 + d.getMinutes());
+    }
+    return base;
+  };
   const addEntry = (en) => setEntries((prev) => { const next = [...prev, stampEntry(en)]; store.set("entries", next); return next; });
   const addEntries = (arr) => setEntries((prev) => { const next = [...prev, ...arr.map((e) => stampEntry({ ...e, id: uid() }))]; store.set("entries", next); return next; });
   const removeEntry = (id) => setEntries((prev) => { const next = prev.filter((e) => e.id !== id); store.set("entries", next); return next; });
@@ -2073,26 +2132,43 @@ export default function App() {
   const currentWeight = weights.length
     ? [...weights].sort((a, b) => new Date(b.date) - new Date(a.date))[0].kg
     : (profile ? profile.startWeight : 0);
+  const measuredBmr = (bodyComp || []).slice().reverse().find((x) => x && x.bmr)?.bmr || null;
+  const latestBf = (bodyComp || []).slice().reverse().find((x) => x && x.body_fat)?.body_fat || null;
   const plan = useMemo(() => {
     if (!profile) return null;
     const w = currentWeight || profile.startWeight; // 用目前體重動態重算,越減越準
-    const bmr = bmrOf({ sex: profile.sex, weight: w, height: profile.height, age: profile.age });
+    const estBmr = bmrOf({ sex: profile.sex, weight: w, height: profile.height, age: profile.age });
+    const bmr = measuredBmr || estBmr; // 有體脂計量測值就用量測的,更貼近本人
+    const bmrSource = measuredBmr ? "量測" : "估算";
     const tdee = bmr * profile.activity;
     const planDays = planDaysOf(profile);
     const dailyDeficitNeeded = (profile.targetLossKg * KCAL_PER_KG) / planDays;
-    // 攝取目標:TDEE 減飲食缺口,但不低於 BMR(健康下限)
+    // 攝取目標:TDEE 減飲食缺口,但不低於 BMR、且不低於安全下限
+    const floor = Math.max(bmr, profile.sex === "male" ? 1500 : 1200);
     let intakeTarget = tdee - profile.dietDeficit;
     let tooAggressive = false;
-    if (intakeTarget < bmr) { intakeTarget = bmr; tooAggressive = true; }
+    if (intakeTarget < floor) { intakeTarget = floor; tooAggressive = true; }
     const dietDeficitActual = tdee - intakeTarget;
     const autoExerciseTarget = Math.max(0, dailyDeficitNeeded - dietDeficitActual);
     const exerciseTarget = profile.exerciseGoal > 0 ? profile.exerciseGoal : autoExerciseTarget;
-    // 巨量營養素:蛋白質 1.8g/kg、脂肪 25%、其餘澱粉
-    const proteinTarget = w * 1.8;
+    // 蛋白質:有體脂就以「淨體重」抓(2.0 g/kg,減脂保肌肉更準),否則用體重 1.8 g/kg
+    const leanKg = latestBf ? w * (1 - latestBf / 100) : null;
+    const pBasis = leanKg || w;
+    const proteinTarget = Math.round(pBasis * (leanKg ? 2.0 : 1.8));
+    const proteinMin = Math.round(pBasis * (leanKg ? 1.8 : 1.6));
+    const proteinMax = Math.round(pBasis * (leanKg ? 2.4 : 2.2));
+    // 脂肪 20–30%(取 25% 當目標),其餘給澱粉;纖維約每 1000 kcal 14 g
     const fatTarget = (intakeTarget * 0.25) / 9;
+    const fatMin = (intakeTarget * 0.20) / 9;
+    const fatMax = (intakeTarget * 0.30) / 9;
     const carbTarget = Math.max(0, (intakeTarget - proteinTarget * 4 - fatTarget * 9) / 4);
-    return { bmr, tdee, dailyDeficitNeeded, intakeTarget, exerciseTarget, tooAggressive, proteinTarget, fatTarget, carbTarget };
-  }, [profile, currentWeight]);
+    const fiberTarget = Math.min(38, Math.max(25, Math.round((intakeTarget / 1000) * 14)));
+    const intakeLow = Math.round(intakeTarget - 75), intakeHigh = Math.round(intakeTarget + 75);
+    return {
+      bmr, bmrSource, tdee, dailyDeficitNeeded, intakeTarget, intakeLow, intakeHigh, exerciseTarget, tooAggressive,
+      proteinTarget, proteinMin, proteinMax, fatTarget, fatMin, fatMax, carbTarget, fiberTarget, leanKg,
+    };
+  }, [profile, currentWeight, measuredBmr, latestBf]);
 
   if (!loaded) return <Shell><div style={{ padding: 40, textAlign: "center", color: C.faint }}>載入中…</div></Shell>;
   if (!profile || editing) return <Shell><ProfileForm initial={profile} onSave={saveProfile} /></Shell>;
