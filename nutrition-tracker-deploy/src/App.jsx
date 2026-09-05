@@ -107,13 +107,18 @@ const WEB_SEARCH = [{ type: "web_search_20250305", name: "web_search" }];
 async function claudeBlocks(content, tools) {
   const body = { model: MODEL, max_tokens: 2000, messages: [{ role: "user", content }] };
   if (tools) body.tools = tools;
-  const resp = await fetch(API_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await resp.json();
-  return data.content.filter((i) => i.type === "text").map((i) => i.text);
+  let resp;
+  try {
+    resp = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (e) { throw new Error("連線失敗:" + (e.message || "網路錯誤") + "(檢查 " + API_URL + ")"); }
+  const raw = await resp.text();
+  if (!resp.ok) throw new Error(`AI 端點回傳 ${resp.status}:${raw.slice(0, 140)}`);
+  let data;
+  try { data = JSON.parse(raw); } catch { throw new Error("端點回應不是 JSON(可能 /api/messages 未部署):" + raw.slice(0, 100)); }
+  if (data.error) throw new Error("API 錯誤:" + String(data.error.message || JSON.stringify(data.error)).slice(0, 160));
+  const blocks = (data.content || []).filter((i) => i.type === "text").map((i) => i.text);
+  if (!blocks.length) throw new Error("API 沒有回傳內容");
+  return blocks;
 }
 function parseObj(blocks) {
   for (let i = blocks.length - 1; i >= 0; i--) { try { return looseJSON(blocks[i]); } catch {} }
@@ -126,7 +131,7 @@ function parseArr(blocks) {
 const srcLabel = (s) => ({ label: "讀取營養標示", web: "網路查詢", estimate: "AI 估算", barcode: "條碼查詢", history: "上次紀錄" }[s] || "");
 
 async function analyzeFood(base64, mediaType) {
-  const blocks = await claudeBlocks([
+  const content = [
     { type: "image", source: { type: "base64", media_type: mediaType, data: base64 } },
     {
       type: "text",
@@ -137,17 +142,23 @@ async function analyzeFood(base64, mediaType) {
         "(3)若是無包裝食物,依外觀估算,多樣食物請加總。" +
         '最後只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"portion":"份量說明","source":"label|web|estimate","note":"補充"}。單位為公克與大卡,用繁體中文。',
     },
-  ], WEB_SEARCH);
+  ];
+  let blocks;
+  try { blocks = await claudeBlocks(content, WEB_SEARCH); }
+  catch { blocks = await claudeBlocks(content); } // 上網工具不可用時,退成純視覺估算
   return parseObj(blocks);
 }
 async function analyzeFoodByName(name) {
-  const blocks = await claudeBlocks([{
+  const content = [{
     type: "text",
     text:
       `你是營養分析助手,可用網路搜尋。使用者輸入的食物或商品名稱:「${name}」。` +
       "請上網查詢該產品/食物一份的營養資訊(找不到明確產品時,依常見版本估算)。" +
       '只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"portion":"份量說明","source":"web|estimate","note":"補充(如查到的來源或份量假設)"}。單位為公克與大卡,用繁體中文。',
-  }], WEB_SEARCH);
+  }];
+  let blocks;
+  try { blocks = await claudeBlocks(content, WEB_SEARCH); }
+  catch { blocks = await claudeBlocks(content); }
   return parseObj(blocks);
 }
 async function analyzeExercise(base64, mediaType, weight) {
@@ -1014,7 +1025,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     if (!name) return;
     setPreview(null); setStatus("loading"); setErr("");
     try { setResult(await analyzeFoodByName(name)); setQty(1); setStatus("result"); }
-    catch { setErr("查詢失敗,可以改用手動輸入。"); setStatus("manual"); }
+    catch (e) { setErr((e && e.message) || "查詢失敗,可以改用手動輸入。"); setStatus("manual"); }
   }
 
   async function handleFile(e) {
@@ -1033,7 +1044,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
       setQty(1);
       setStatus("result");
     } catch (e2) {
-      setErr("照片分析失敗,可以改用手動輸入。");
+      setErr((e2 && e2.message) || "照片分析失敗,可以改用手動輸入。");
       setStatus("manual");
     }
   }
