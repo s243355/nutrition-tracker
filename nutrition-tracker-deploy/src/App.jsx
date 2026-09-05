@@ -39,6 +39,11 @@ const pad2 = (n) => String(n).padStart(2, "0");
 const todayStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
 const uid = () => Math.random().toString(36).slice(2, 10);
 const r0 = (n) => Math.round(n || 0);
+const MEALS = ["早", "午", "晚", "點心"];
+function currentMeal() {
+  const d = new Date(); const m = d.getHours() * 60 + d.getMinutes();
+  if (m < 630) return "早"; if (m < 900) return "午"; if (m < 1260) return "晚"; return "點心";
+}
 
 // 一律以「本地日期」解析,避免 new Date("YYYY-MM-DD") 被當成 UTC 造成跨時區差一天
 function parseLocal(s) {
@@ -114,7 +119,7 @@ function parseArr(blocks) {
   for (let i = blocks.length - 1; i >= 0; i--) { try { return looseArr(blocks[i]); } catch {} }
   return looseArr(blocks.join("\n"));
 }
-const srcLabel = (s) => ({ label: "讀取營養標示", web: "網路查詢", estimate: "AI 估算" }[s] || "");
+const srcLabel = (s) => ({ label: "讀取營養標示", web: "網路查詢", estimate: "AI 估算", barcode: "條碼查詢", history: "上次紀錄" }[s] || "");
 
 async function analyzeFood(base64, mediaType) {
   const blocks = await claudeBlocks([
@@ -791,6 +796,89 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
   );
 }
 
+/* 條碼掃描 + Open Food Facts 查詢 */
+function BarcodeView({ onResult }) {
+  const [manual, setManual] = useState("");
+  const [phase, setPhase] = useState("idle"); // idle | scanning | loading | error
+  const [err, setErr] = useState("");
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const stopRef = useRef(false);
+  const supported = typeof window !== "undefined" && "BarcodeDetector" in window;
+
+  function stopCam() {
+    stopRef.current = true;
+    try { streamRef.current && streamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
+    streamRef.current = null;
+  }
+  useEffect(() => () => stopCam(), []);
+
+  async function lookup(code) {
+    setPhase("loading"); setErr("");
+    try {
+      const r = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_zh,brands,serving_size,nutriments`);
+      const j = await r.json();
+      if (!j || j.status === 0 || !j.product) { setErr("查無此條碼,改用拍照或手動輸入。"); setPhase("error"); return; }
+      const p = j.product, n = p.nutriments || {};
+      const per = n["energy-kcal_serving"] != null;
+      const pick = (k) => (per ? n[`${k}_serving`] : n[`${k}_100g`]);
+      stopCam();
+      onResult({
+        food_name: p.product_name_zh || p.product_name || (p.brands ? `${p.brands} 商品` : "商品"),
+        calories: r0(per ? n["energy-kcal_serving"] : n["energy-kcal_100g"]),
+        protein: r0(pick("proteins")), carbs: r0(pick("carbohydrates")), fat: r0(pick("fat")),
+        portion: per ? (p.serving_size || "每份") : "每 100 克",
+        source: "barcode", note: "資料來源:Open Food Facts",
+      });
+    } catch { setErr("查詢失敗,請稍後再試。"); setPhase("error"); }
+  }
+
+  async function startScan() {
+    if (!supported) return;
+    setErr(""); setPhase("scanning"); stopRef.current = false;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      const det = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128"] });
+      const loop = async () => {
+        if (stopRef.current || !videoRef.current) return;
+        try { const codes = await det.detect(videoRef.current); if (codes && codes.length) { stopRef.current = true; lookup(codes[0].rawValue); return; } } catch {}
+        requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    } catch { setErr("無法開啟相機,請改用手動輸入條碼。"); setPhase("idle"); }
+  }
+
+  return (
+    <div>
+      {phase === "loading" ? <Loading text="查詢商品中…" /> : (
+        <>
+          {supported && (
+            <div style={{ marginBottom: 14 }}>
+              {phase === "scanning"
+                ? <video ref={videoRef} playsInline muted style={{ width: "100%", height: 200, objectFit: "cover", borderRadius: 14, background: "#000" }} />
+                : <Btn kind="accent" onClick={startScan}><Camera size={18} /> 開啟相機掃描</Btn>}
+            </div>
+          )}
+          {err && <p style={{ fontSize: 13, color: C.warn, marginBottom: 10 }}>{err}</p>}
+          <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "6px 0" }}>
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+            <span style={{ fontSize: 12, color: C.faint }}>{supported ? "或手動輸入條碼號碼" : "輸入條碼號碼查詢"}</span>
+            <div style={{ flex: 1, height: 1, background: C.line }} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={manual} onChange={(e) => setManual(e.target.value)} inputMode="numeric"
+              onKeyDown={(e) => { if (e.key === "Enter" && manual.trim()) lookup(manual.trim()); }}
+              placeholder="例:4710…" style={{ ...inputStyle, flex: 1 }} />
+            <button onClick={() => manual.trim() && lookup(manual.trim())} style={{ background: C.ink, color: "#fff", border: "none", borderRadius: 10, padding: "0 18px", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>查詢</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  拍照分析(食物 / 運動共用)                                        */
 /* ------------------------------------------------------------------ */
@@ -958,6 +1046,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
                       placeholder="例:全家 茶葉蛋、大麥克" style={{ ...inputStyle, flex: 1 }} />
                     <button onClick={nameLookup} style={{ background: C.ink, color: "#fff", border: "none", borderRadius: 10, padding: "0 18px", fontSize: 15, fontWeight: 600, cursor: "pointer", fontFamily: FONT }}>查詢</button>
                   </div>
+                  <Btn kind="ghost" onClick={() => setStatus("barcode")} style={{ marginTop: 2 }}><ImageIcon size={16} /> 掃條碼查營養</Btn>
                 </>
               )}
               <button onClick={() => setStatus("manual")} style={{ background: "none", border: "none", color: C.sub, fontSize: 13, cursor: "pointer", marginTop: 6, fontFamily: FONT }}>
@@ -1015,6 +1104,10 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
           <ResultCard title={result.activity} sub={`約 ${r0(result.duration_min)} 分鐘`} confidence={result.confidence}
             rows={[["消耗熱量", `${r0(result.calories_burned)} kcal`]]}
             onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
+        )}
+
+        {status === "barcode" && (
+          <BarcodeView onResult={(data) => { setResult(data); setQty(1); setStatus("result"); }} />
         )}
 
         {status === "batch" && (
@@ -1219,13 +1312,14 @@ function Countdown({ startDate, calRemaining }) {
     </div>
   );
 }
-function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, date, setDate, onEditEntry }) {
+function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, date, setDate, onEditEntry, onAddMany }) {
   const today = todayStr();
   const viewDate = date || today;
   const isToday = viewDate === today;
   const todays = entries.filter((e) => e.date === viewDate);
   const foods = todays.filter((e) => e.type === "food");
   const exs = todays.filter((e) => e.type === "exercise");
+  const prevFoods = entries.filter((e) => e.date === addDays(viewDate, -1) && e.type === "food");
 
   const consumed = foods.reduce((s, e) => s + e.calories, 0);
   const burned = exs.reduce((s, e) => s + e.burned, 0);
@@ -1305,23 +1399,41 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
       </Btn>
 
       {/* 動作 */}
-      <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
         <Btn onClick={() => openSheet("food")} kind="accent"><Utensils size={17} /> 記錄飲食</Btn>
         <Btn onClick={() => openSheet("exercise")} kind="primary"><Activity size={17} /> 記錄運動</Btn>
       </div>
+      {prevFoods.length > 0 && (
+        <button onClick={() => onAddMany(prevFoods.map((e) => ({ type: "food", name: e.name, calories: e.calories, protein: e.protein, carbs: e.carbs, fat: e.fat, meal: e.meal })))}
+          style={{ display: "block", width: "100%", background: "none", border: "none", color: C.cal, fontSize: 13, cursor: "pointer", fontFamily: FONT, marginBottom: 20 }}>
+          複製前一天的飲食({prevFoods.length} 項)
+        </button>
+      )}
 
       {/* 清單 */}
       {todays.length === 0 ? (
         <div style={{ textAlign: "center", padding: "30px 0", color: C.faint, fontSize: 14 }}>
-          今天還沒有紀錄,拍一張開始吧。
+          {isToday ? "今天" : "這天"}還沒有紀錄。
         </div>
       ) : (
         <>
-          {foods.length > 0 && <SectionLabel>飲食</SectionLabel>}
-          {foods.map((e) => (
-            <LogRow key={e.id} left={e.name} sub={`P${e.protein} · C${e.carbs} · F${e.fat}`}
-              right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
-          ))}
+          {MEALS.concat("其他").map((mealName) => {
+            const rows = foods.filter((e) => (e.meal || "其他") === mealName);
+            if (!rows.length) return null;
+            const cal = rows.reduce((s, e) => s + e.calories, 0);
+            return (
+              <div key={mealName}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "16px 0 8px" }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: C.sub }}>{mealName === "其他" ? "其他" : mealName + "餐"}</span>
+                  <span style={{ fontSize: 12, color: C.faint }}>{cal} kcal</span>
+                </div>
+                {rows.map((e) => (
+                  <LogRow key={e.id} left={e.name} sub={`P${e.protein} · C${e.carbs} · F${e.fat}`}
+                    right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
+                ))}
+              </div>
+            );
+          })}
           {exs.length > 0 && <SectionLabel>運動</SectionLabel>}
           {exs.map((e) => (
             <LogRow key={e.id} left={e.name} sub={e.duration ? `${e.duration} 分鐘` : ""}
@@ -1380,7 +1492,11 @@ function Progress({ profile, entries, weights, plan, onAddWeight, bodyComp, open
   const allW = [{ date: profile.startDate, kg: profile.startWeight }, ...weights]
     .filter((x) => x.kg)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
-  const wData = allW.map((x) => ({ date: fmtDate(x.date), kg: x.kg }));
+  const wData = allW.map((x, i, arr) => {
+    const win = arr.slice(Math.max(0, i - 6), i + 1);
+    const ma = win.reduce((s, p) => s + p.kg, 0) / win.length;
+    return { date: fmtDate(x.date), kg: x.kg, ma: Math.round(ma * 10) / 10 };
+  });
   const latest = allW[allW.length - 1]?.kg ?? profile.startWeight;
   const lost = profile.startWeight - latest;
   const targetW = profile.startWeight - profile.targetLossKg;
@@ -1456,9 +1572,11 @@ function Progress({ profile, entries, weights, plan, onAddWeight, bodyComp, open
             <Tooltip contentStyle={{ borderRadius: 10, border: `1px solid ${C.line}`, fontSize: 12 }} />
             <ReferenceLine y={targetW} stroke={C.good} strokeDasharray="4 4" label={{ value: `目標 ${targetW}`, fontSize: 10, fill: C.good, position: "insideBottomRight" }} />
             <Line type="monotone" dataKey="kg" stroke={C.ink} strokeWidth={2.5} dot={{ r: 3, fill: C.ink }} />
+            <Line type="monotone" dataKey="ma" stroke={C.protein} strokeWidth={2} dot={false} strokeDasharray="5 3" />
           </LineChart>
         </ResponsiveContainer>
       </div>
+      <div style={{ fontSize: 11.5, color: C.faint, marginTop: -4, marginBottom: 8 }}>● 實測體重　<span style={{ color: C.protein }}>┅ 趨勢(移動平均)</span>,看趨勢線比單日更準。</div>
       <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
         <input type="number" placeholder="今天體重 kg" value={w} onChange={(e) => setW(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
         <button onClick={() => { if (+w) { onAddWeight({ date: today, kg: +w }); setW(""); } }}
@@ -1744,17 +1862,29 @@ function EditSheet({ entry, onSave, onDelete, onClose }) {
   const isFood = entry.type === "food";
   const [v, setV] = useState(
     isFood
-      ? { name: entry.name || "", calories: entry.calories, protein: entry.protein, carbs: entry.carbs, fat: entry.fat }
+      ? { name: entry.name || "", calories: entry.calories, protein: entry.protein, carbs: entry.carbs, fat: entry.fat, meal: entry.meal || "其他" }
       : { name: entry.name || "", burned: entry.burned, duration: entry.duration || 0 }
   );
   const set = (k) => (e) => setV({ ...v, [k]: e.target.value });
   function save() {
-    if (isFood) onSave({ name: v.name || "食物", calories: +v.calories || 0, protein: +v.protein || 0, carbs: +v.carbs || 0, fat: +v.fat || 0 });
+    if (isFood) onSave({ name: v.name || "食物", calories: +v.calories || 0, protein: +v.protein || 0, carbs: +v.carbs || 0, fat: +v.fat || 0, meal: v.meal });
     else onSave({ name: v.name || "運動", burned: +v.burned || 0, duration: +v.duration || 0 });
   }
   return (
     <Sheet title="編輯紀錄" onClose={onClose}>
       <Field label={isFood ? "食物名稱" : "運動類型"}><input style={inputStyle} value={v.name} onChange={set("name")} /></Field>
+      {isFood && (
+        <Field label="餐別">
+          <div style={{ display: "flex", gap: 8 }}>
+            {MEALS.map((m) => (
+              <button key={m} onClick={() => setV({ ...v, meal: m })} style={{
+                flex: 1, padding: "9px 0", borderRadius: 9, fontSize: 14, fontFamily: FONT, cursor: "pointer",
+                border: `1px solid ${v.meal === m ? C.ink : C.line}`, background: v.meal === m ? C.ink : C.bg, color: v.meal === m ? "#fff" : C.sub,
+              }}>{m}</button>
+            ))}
+          </div>
+        </Field>
+      )}
       {isFood ? (
         <>
           <Field label="熱量 kcal"><input type="number" style={inputStyle} value={v.calories} onChange={set("calories")} /></Field>
@@ -1846,7 +1976,9 @@ export default function App() {
 
   const saveProfile = (p) => { setProfile(p); store.set("profile", p); setEditing(false); };
   const updateProfile = (patch) => { const p = { ...profile, ...patch }; setProfile(p); store.set("profile", p); };
-  const addEntry = (en) => setEntries((prev) => { const next = [...prev, { ...en, date: selDate }]; store.set("entries", next); return next; });
+  const stampEntry = (en) => ({ ...en, date: selDate, meal: en.type === "food" ? (en.meal || currentMeal()) : en.meal });
+  const addEntry = (en) => setEntries((prev) => { const next = [...prev, stampEntry(en)]; store.set("entries", next); return next; });
+  const addEntries = (arr) => setEntries((prev) => { const next = [...prev, ...arr.map((e) => stampEntry({ ...e, id: uid() }))]; store.set("entries", next); return next; });
   const removeEntry = (id) => setEntries((prev) => { const next = prev.filter((e) => e.id !== id); store.set("entries", next); return next; });
   const updateEntry = (id, patch) => setEntries((prev) => { const next = prev.map((e) => (e.id === id ? { ...e, ...patch } : e)); store.set("entries", next); return next; });
   const addWeight = (rec) => {
@@ -1859,9 +1991,13 @@ export default function App() {
     if (rec.weight) addWeight({ date: rec.date, kg: rec.weight });
   };
 
+  const currentWeight = weights.length
+    ? [...weights].sort((a, b) => new Date(b.date) - new Date(a.date))[0].kg
+    : (profile ? profile.startWeight : 0);
   const plan = useMemo(() => {
     if (!profile) return null;
-    const bmr = bmrOf({ sex: profile.sex, weight: profile.startWeight, height: profile.height, age: profile.age });
+    const w = currentWeight || profile.startWeight; // 用目前體重動態重算,越減越準
+    const bmr = bmrOf({ sex: profile.sex, weight: w, height: profile.height, age: profile.age });
     const tdee = bmr * profile.activity;
     const dailyDeficitNeeded = (profile.targetLossKg * KCAL_PER_KG) / PLAN_DAYS;
     // 攝取目標:TDEE 減飲食缺口,但不低於 BMR(健康下限)
@@ -1871,18 +2007,15 @@ export default function App() {
     const dietDeficitActual = tdee - intakeTarget;
     const exerciseTarget = Math.max(0, dailyDeficitNeeded - dietDeficitActual);
     // 巨量營養素:蛋白質 1.8g/kg、脂肪 25%、其餘澱粉
-    const proteinTarget = profile.startWeight * 1.8;
+    const proteinTarget = w * 1.8;
     const fatTarget = (intakeTarget * 0.25) / 9;
     const carbTarget = Math.max(0, (intakeTarget - proteinTarget * 4 - fatTarget * 9) / 4);
     return { bmr, tdee, dailyDeficitNeeded, intakeTarget, exerciseTarget, tooAggressive, proteinTarget, fatTarget, carbTarget };
-  }, [profile]);
+  }, [profile, currentWeight]);
 
   if (!loaded) return <Shell><div style={{ padding: 40, textAlign: "center", color: C.faint }}>載入中…</div></Shell>;
   if (!profile || editing) return <Shell><ProfileForm initial={profile} onSave={saveProfile} /></Shell>;
 
-  const currentWeight = weights.length
-    ? [...weights].sort((a, b) => new Date(b.date) - new Date(a.date))[0].kg
-    : profile.startWeight;
   const latestBodyComp = bodyComp.length ? bodyComp[bodyComp.length - 1] : null;
   const streak = plan ? computeStreak(entries, profile, plan) : { cur: 0, best: 0 };
 
@@ -1894,7 +2027,7 @@ export default function App() {
         <div style={{ marginLeft: "auto" }}><SyncBadge /></div>
       </div>
 
-      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} date={selDate} setDate={setSelDate} onEditEntry={setEditEntry} />}
+      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} date={selDate} setDate={setSelDate} onEditEntry={setEditEntry} onAddMany={addEntries} />}
       {tab === "suggest" && <Suggest profile={profile} entries={entries} plan={plan} weight={currentWeight} onAdd={addEntry} onUpdateProfile={updateProfile} openSheet={setSheet} />}
       {tab === "progress" && <Progress profile={profile} entries={entries} weights={weights} plan={plan} onAddWeight={addWeight} bodyComp={bodyComp} openBodyComp={() => setBcOpen(true)} />}
       {tab === "me" && <Me profile={profile} plan={plan} onEdit={() => setEditing(true)} onUpdateProfile={updateProfile} />}
