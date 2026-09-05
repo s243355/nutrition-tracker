@@ -1012,12 +1012,11 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     return [...map.values()].sort((a, b) => b.count - a.count || b.last - a.last).slice(0, 20);
   }, [entries, isFood]);
 
-  const [sel, setSel] = useState([]);
-  const toggleSel = (i) => setSel((prev) => (prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]));
-  function historyToBatch() {
-    if (!sel.length) return;
-    const items = sel.map((i) => ({ id: uid(), preview: null, status: "done", data: history[i], qty: 1, added: false }));
-    setBatch(items); setBatchNote(""); setPreview(null); setErr(""); setSel([]); setStatus("batch");
+  const [flash, setFlash] = useState(null);
+  function addHistory(h, i) {
+    onAdd({ id: uid(), date: todayStr(), type: "food", name: h.food_name || "食物", calories: r0(h.calories), protein: r0(h.protein), carbs: r0(h.carbs), fat: r0(h.fat) });
+    setFlash(i);
+    setTimeout(() => setFlash((f) => (f === i ? null : f)), 900);
   }
 
   async function nameLookup() {
@@ -1118,33 +1117,29 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
             </div>
             {isFood && history.length > 0 && (
               <div style={{ marginTop: 20 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 8 }}>吃過的(可勾選多樣一起帶入)</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 260, overflowY: "auto" }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 8 }}>吃過的(點一下直接記一份)</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 300, overflowY: "auto" }}>
                   {history.map((h, i) => {
-                    const on = sel.includes(i);
+                    const on = flash === i;
                     return (
-                      <button key={i} onClick={() => toggleSel(i)} style={{
+                      <button key={i} onClick={() => addHistory(h, i)} style={{
                         display: "flex", alignItems: "center", justifyContent: "space-between",
-                        background: on ? "#F1EFEA" : C.card, border: `1px solid ${on ? C.ink : C.line}`, borderRadius: 12,
-                        padding: "11px 14px", cursor: "pointer", fontFamily: FONT, textAlign: "left",
+                        background: on ? "#EAF3EE" : C.card, border: `1px solid ${on ? C.good : C.line}`, borderRadius: 12,
+                        padding: "11px 14px", cursor: "pointer", fontFamily: FONT, textAlign: "left", transition: "background .15s",
                       }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{h.food_name}</div>
                           <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{h.count} 次 · P{r0(h.protein)} · C{r0(h.carbs)} · F{r0(h.fat)}</div>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                          <span style={{ fontSize: 14, fontWeight: 600, color: C.cal }}>{r0(h.calories)} kcal</span>
-                          {on ? <Check size={16} color={C.ink} /> : <Plus size={16} color={C.sub} />}
+                          <span style={{ fontSize: 14, fontWeight: 600, color: on ? C.good : C.cal }}>{on ? "已加入 ✓" : `${r0(h.calories)} kcal`}</span>
+                          {!on && <Plus size={16} color={C.sub} />}
                         </div>
                       </button>
                     );
                   })}
                 </div>
-                {sel.length > 0 && (
-                  <Btn kind="accent" onClick={historyToBatch} style={{ marginTop: 10 }}>
-                    <Check size={16} /> 帶入所選 {sel.length} 樣
-                  </Btn>
-                )}
+                <div style={{ fontSize: 11.5, color: C.faint, textAlign: "center", marginTop: 8 }}>點多樣就記多樣;要兩份就點兩下</div>
               </div>
             )}
           </>
