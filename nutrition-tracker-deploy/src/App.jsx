@@ -31,6 +31,10 @@ const FONT =
   '"PingFang TC","Noto Sans TC","Helvetica Neue",system-ui,sans-serif';
 const KCAL_PER_KG = 7700;
 const PLAN_DAYS = 90;
+function planDaysOf(profile) {
+  const end = profile.targetDate || addDays(profile.startDate, PLAN_DAYS);
+  return Math.max(1, daysBetween(profile.startDate, end));
+}
 
 /* ------------------------------------------------------------------ */
 /*  工具函式                                                           */
@@ -248,7 +252,7 @@ async function weeklySummaryAI(stats, profile, plan) {
   const blocks = await claudeBlocks([{
     type: "text",
     text:
-      `使用者 90 天目標減 ${profile.targetLossKg} 公斤。本週:有記錄 ${stats.loggedDays} 天、其中達標 ${stats.hitDays} 天;` +
+      `使用者目標減 ${profile.targetLossKg} 公斤。本週:有記錄 ${stats.loggedDays} 天、其中達標 ${stats.hitDays} 天;` +
       `平均每日攝取 ${r0(stats.avgEat)} 大卡、平均淨缺口 ${r0(stats.avgDef)} 大卡(每日目標 ${r0(plan.dailyDeficitNeeded)})、平均蛋白質 ${r0(stats.avgProt)} 公克;` +
       `運動 ${stats.sessCount} 次共消耗 ${r0(stats.burnSum)} 大卡;` +
       (stats.wChange != null ? `體重變化 ${stats.wChange.toFixed(1)} 公斤。` : "本週體重資料不足。") +
@@ -256,15 +260,36 @@ async function weeklySummaryAI(stats, profile, plan) {
   }]);
   return blocks.join("\n").trim();
 }
+async function nextWeekPlanAI(stats, profile, plan, prog) {
+  const blocks = await claudeBlocks([{
+    type: "text",
+    text:
+      `使用者減重中。目標共減 ${profile.targetLossKg} 公斤,驗收日還剩 ${prog.remainingDays} 天。` +
+      `起始 ${prog.startWeight}、目前 ${prog.currentWeight}、目標 ${prog.targetWeight} 公斤;已減 ${prog.lostSoFar.toFixed(1)}、還需再減 ${Math.max(0, prog.remainingKg).toFixed(1)} 公斤。` +
+      `依目前平均速度預估總共可減約 ${prog.projectedLoss.toFixed(1)} 公斤(${prog.onTrack ? "達標或超前" : "落後於目標"})。` +
+      `本週:記錄 ${stats.loggedDays} 天、達標 ${stats.hitDays} 天;平均每日攝取 ${r0(stats.avgEat)}、平均淨缺口 ${r0(stats.avgDef)}(每日目標 ${r0(plan.dailyDeficitNeeded)})、平均蛋白質 ${r0(stats.avgProt)} 公克;運動 ${stats.sessCount} 次共 ${r0(stats.burnSum)} 大卡;` +
+      (stats.wChange != null ? `本週體重變化 ${stats.wChange.toFixed(1)} 公斤。` : "本週體重資料不足。") +
+      "請綜合『整體是否落後/超前』與『本週執行狀況』,給下週 3–4 條具體、可執行的調整建議(可涵蓋熱量、運動量與頻率、蛋白質、記錄習慣),務實正向、避免過度激進。只回傳 JSON 字串陣列:[\"建議1\",\"建議2\",\"建議3\"]。繁體中文。",
+  }]);
+  return parseArr(blocks);
+}
 
-function WeeklyReview({ stats, profile, plan }) {
+function WeeklyReview({ stats, profile, plan, progress }) {
   const [text, setText] = useState("");
   const [loading, setLoading] = useState(false);
+  const [tips, setTips] = useState([]);
+  const [tipLoading, setTipLoading] = useState(false);
   async function gen() {
     setLoading(true);
     try { setText(await weeklySummaryAI(stats, profile, plan)); }
     catch { setText("本週 AI 回顧產生失敗,下面的數字仍可參考。"); }
     setLoading(false);
+  }
+  async function genNext() {
+    setTipLoading(true);
+    try { const arr = await nextWeekPlanAI(stats, profile, plan, progress); setTips((arr || []).slice(0, 4)); }
+    catch { setTips(["下週建議產生失敗,請稍後再試。"]); }
+    setTipLoading(false);
   }
   const cell = (label, val, color) => (
     <div style={{ flex: "1 1 30%", background: C.card, borderRadius: 12, padding: "12px 8px", textAlign: "center" }}>
@@ -284,7 +309,21 @@ function WeeklyReview({ stats, profile, plan }) {
         {cell("體重變化", stats.wChange != null ? `${stats.wChange > 0 ? "+" : ""}${stats.wChange.toFixed(1)}kg` : "—", stats.wChange != null && stats.wChange < 0 ? C.good : C.ink)}
       </div>
       {text && <div style={{ background: C.card, borderRadius: 12, padding: 14, fontSize: 13.5, color: C.ink, lineHeight: 1.6, marginBottom: 12, whiteSpace: "pre-wrap" }}>{text}</div>}
-      <Btn kind="primary" onClick={gen}>{loading ? <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={16} />} 產生本週 AI 回顧</Btn>
+      {tips.length > 0 && (
+        <div style={{ background: C.card, borderRadius: 12, padding: 14, marginBottom: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.sub, marginBottom: 10 }}>下週建議</div>
+          {tips.map((t, i) => (
+            <div key={i} style={{ display: "flex", gap: 9, marginBottom: i < tips.length - 1 ? 10 : 0 }}>
+              <span style={{ color: C.cal, flexShrink: 0, fontSize: 12, marginTop: 2 }}>●</span>
+              <span style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.55 }}>{t}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 10 }}>
+        <Btn kind="ghost" onClick={gen}>{loading ? <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={16} />} 本週總結</Btn>
+        <Btn kind="primary" onClick={genNext}>{tipLoading ? <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={16} />} 下週建議</Btn>
+      </div>
     </div>
   );
 }
@@ -518,6 +557,7 @@ const inputStyle = {
 const PROFILE_DEFAULTS = {
   sex: "male", age: 30, height: 170, startWeight: 75,
   activity: 1.375, startDate: todayStr(), targetLossKg: 10, dietDeficit: 500,
+  targetDate: addDays(todayStr(), PLAN_DAYS), exerciseGoal: 0,
   equipment: ["stair", "treadmill", "spin", "trainer"],
   reminderOn: false, reminderTime: "20:00",
 };
@@ -566,7 +606,8 @@ function ProfileForm({ initial, onSave }) {
         <input type="date" style={inputStyle} value={f.startDate} onChange={set("startDate")} />
         {(() => {
           const el = Math.max(0, daysBetween(f.startDate, todayStr()));
-          const dayNo = el + 1, left = Math.max(0, PLAN_DAYS - el);
+          const pd = Math.max(1, daysBetween(f.startDate, f.targetDate || addDays(f.startDate, PLAN_DAYS)));
+          const dayNo = el + 1, left = Math.max(0, pd - el);
           return (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
               <span style={{ fontSize: 12, color: C.sub }}>= 目前第 {dayNo} 天 · 剩 {left} 天</span>
@@ -577,9 +618,20 @@ function ProfileForm({ initial, onSave }) {
           );
         })()}
       </Field>
+      <Field label="驗收日(目標達成日)">
+        <input type="date" style={inputStyle} value={f.targetDate} min={f.startDate} onChange={set("targetDate")} />
+        {(() => {
+          const pd = Math.max(1, daysBetween(f.startDate, f.targetDate || addDays(f.startDate, PLAN_DAYS)));
+          const per = Math.round((f.targetLossKg * KCAL_PER_KG) / pd);
+          return <div style={{ fontSize: 12, color: C.sub, marginTop: 6 }}>共 {pd} 天 · 平均每天需約 {per} 大卡缺口</div>;
+        })()}
+      </Field>
       <Field label={`飲食缺口:每天少吃 ${f.dietDeficit} kcal(其餘靠運動補足)`}>
         <input type="range" min="300" max="750" step="50" value={f.dietDeficit}
           onChange={num("dietDeficit")} style={{ width: "100%", accentColor: C.cal }} />
+      </Field>
+      <Field label="每日運動目標 kcal(0 = 依計畫自動)">
+        <input type="number" style={inputStyle} value={f.exerciseGoal} onChange={num("exerciseGoal")} placeholder="例:500" />
       </Field>
 
       {(lowNow || lowTarget) && (
@@ -597,7 +649,7 @@ function ProfileForm({ initial, onSave }) {
       )}
 
       <Btn onClick={() => onSave(f)} kind="accent" style={{ marginTop: 4 }}>
-        <Check size={18} /> 開始 {PLAN_DAYS} 天計畫
+        <Check size={18} /> 儲存並開始
       </Btn>
     </div>
   );
@@ -1278,11 +1330,11 @@ function DeficitMeter({ deficit, target, consumed, burned, tdee }) {
   );
 }
 const Sep = () => <span style={{ fontSize: 20, color: "rgba(255,255,255,.4)", fontWeight: 700 }}>:</span>;
-function Countdown({ startDate, calRemaining }) {
+function Countdown({ startDate, planDays, calRemaining }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t); }, []);
   const elapsed = Math.max(0, daysBetween(startDate, todayStr()));
-  const daysLeft = Math.max(0, PLAN_DAYS - elapsed);
+  const daysLeft = Math.max(0, (planDays || PLAN_DAYS) - elapsed);
   const d = new Date(now);
   const nextMid = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1, 0, 0, 0, 0);
   const ms = Math.max(0, nextMid - now);
@@ -1331,6 +1383,7 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
   const netDeficit = r0(plan.tdee - consumed + burned);
 
   const dayNo = Math.max(1, daysBetween(profile.startDate, viewDate) + 1);
+  const planDays = planDaysOf(profile);
   const WD = ["日", "一", "二", "三", "四", "五", "六"][new Date(viewDate).getDay()];
   const navBtn = (label, fn, disabled) => (
     <button onClick={fn} disabled={disabled} style={{
@@ -1346,7 +1399,7 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
         {navBtn("‹", () => setDate(addDays(viewDate, -1)), false)}
         <div style={{ flex: 1, textAlign: "center" }}>
           <div style={{ fontSize: 18, fontWeight: 700, color: C.ink }}>{isToday ? "今天" : `${fmtDate(viewDate)}(週${WD})`}</div>
-          <div style={{ fontSize: 12, color: C.sub }}>第 {dayNo} 天{isToday ? ` · 目標剩 ${Math.max(0, PLAN_DAYS - dayNo)} 天` : ""}</div>
+          <div style={{ fontSize: 12, color: C.sub }}>第 {dayNo} 天{isToday ? ` · 目標剩 ${Math.max(0, planDays - dayNo + 1)} 天` : ""}</div>
         </div>
         {navBtn("›", () => setDate(addDays(viewDate, 1)), isToday)}
       </div>
@@ -1354,9 +1407,23 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
         <button onClick={() => setDate(today)} style={{ display: "block", margin: "0 auto 14px", background: "none", border: "none", color: C.cal, fontSize: 13, cursor: "pointer", fontFamily: FONT }}>回到今天</button>
       )}
 
-      {isToday && <Countdown startDate={profile.startDate} calRemaining={r0(budget - consumed)} />}
+      {isToday && <Countdown startDate={profile.startDate} planDays={planDays} calRemaining={r0(budget - consumed)} />}
 
       <DeficitMeter deficit={netDeficit} target={plan.dailyDeficitNeeded} consumed={consumed} burned={burned} tdee={plan.tdee} />
+
+      {plan.exerciseTarget > 0 && (
+        <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>今日運動目標</span>
+            <span style={{ fontSize: 13, fontWeight: 600, color: burned >= plan.exerciseTarget ? C.good : C.sub }}>
+              {r0(burned)} / {r0(plan.exerciseTarget)} kcal{burned >= plan.exerciseTarget ? " ✓" : ""}
+            </span>
+          </div>
+          <div style={{ height: 10, background: C.line, borderRadius: 99, overflow: "hidden" }}>
+            <div style={{ height: 10, width: `${Math.min(100, plan.exerciseTarget ? (burned / plan.exerciseTarget) * 100 : 0)}%`, background: burned >= plan.exerciseTarget ? C.good : C.protein, borderRadius: 99, transition: "width .4s" }} />
+          </div>
+        </div>
+      )}
 
       {(streak.cur > 0 || streak.best > 0) && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.card, borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
@@ -1486,7 +1553,7 @@ function Progress({ profile, entries, weights, plan, onAddWeight, bodyComp, open
   const avgDeficit = loggedDays
     ? dayKeys.reduce((s, d) => s + (plan.tdee - byDay[d].eat + byDay[d].burn), 0) / loggedDays
     : 0;
-  const projectedLoss = (avgDeficit * PLAN_DAYS) / KCAL_PER_KG;
+  const projectedLoss = (avgDeficit * planDaysOf(profile)) / KCAL_PER_KG;
 
   // 體重曲線
   const allW = [{ date: profile.startDate, kg: profile.startWeight }, ...weights]
@@ -1559,7 +1626,13 @@ function Progress({ profile, entries, weights, plan, onAddWeight, bodyComp, open
       </div>
 
       {/* 每週回顧 */}
-      <WeeklyReview stats={weekStats(entries, weights, profile, plan)} profile={profile} plan={plan} />
+      <WeeklyReview stats={weekStats(entries, weights, profile, plan)} profile={profile} plan={plan}
+        progress={{
+          startWeight: profile.startWeight, currentWeight: latest, targetWeight: targetW,
+          lostSoFar: lost, remainingKg: latest - targetW,
+          remainingDays: Math.max(0, daysBetween(todayStr(), profile.targetDate || addDays(profile.startDate, PLAN_DAYS))),
+          projectedLoss, onTrack: projectedLoss >= profile.targetLossKg,
+        }} />
 
       {/* 體重圖 */}
       <SectionLabel>體重趨勢</SectionLabel>
@@ -1930,7 +2003,7 @@ export default function App() {
       const w = await store.get("weights");
       const bc = await store.get("bodycomp");
       // 向前相容:舊資料缺的新欄位自動補預設,既有值一律保留
-      if (p) setProfile({ ...PROFILE_DEFAULTS, ...p });
+      if (p) setProfile({ ...PROFILE_DEFAULTS, ...p, targetDate: p.targetDate || addDays(p.startDate || todayStr(), PLAN_DAYS) });
       if (Array.isArray(e)) setEntries(e);
       if (Array.isArray(w)) setWeights(w);
       if (Array.isArray(bc)) setBodyComp(bc);
@@ -1999,13 +2072,15 @@ export default function App() {
     const w = currentWeight || profile.startWeight; // 用目前體重動態重算,越減越準
     const bmr = bmrOf({ sex: profile.sex, weight: w, height: profile.height, age: profile.age });
     const tdee = bmr * profile.activity;
-    const dailyDeficitNeeded = (profile.targetLossKg * KCAL_PER_KG) / PLAN_DAYS;
+    const planDays = planDaysOf(profile);
+    const dailyDeficitNeeded = (profile.targetLossKg * KCAL_PER_KG) / planDays;
     // 攝取目標:TDEE 減飲食缺口,但不低於 BMR(健康下限)
     let intakeTarget = tdee - profile.dietDeficit;
     let tooAggressive = false;
     if (intakeTarget < bmr) { intakeTarget = bmr; tooAggressive = true; }
     const dietDeficitActual = tdee - intakeTarget;
-    const exerciseTarget = Math.max(0, dailyDeficitNeeded - dietDeficitActual);
+    const autoExerciseTarget = Math.max(0, dailyDeficitNeeded - dietDeficitActual);
+    const exerciseTarget = profile.exerciseGoal > 0 ? profile.exerciseGoal : autoExerciseTarget;
     // 巨量營養素:蛋白質 1.8g/kg、脂肪 25%、其餘澱粉
     const proteinTarget = w * 1.8;
     const fatTarget = (intakeTarget * 0.25) / 9;
