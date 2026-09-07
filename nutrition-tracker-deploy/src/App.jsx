@@ -1092,7 +1092,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
         </div>
 
         <input ref={camRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
-        <input ref={libRef} type="file" accept="image/*" multiple onChange={handleLibrary} style={{ display: "none" }} />
+        <input ref={libRef} type="file" accept="image/*" multiple={isFood} onChange={handleLibrary} style={{ display: "none" }} />
 
         {preview && (
           <img src={preview} alt="" style={{ width: "100%", height: 190, objectFit: "cover", borderRadius: 14, marginBottom: 16 }} />
@@ -1105,7 +1105,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <Btn onClick={() => camRef.current.click()} kind="accent"><Camera size={18} /> 拍照</Btn>
-              <Btn onClick={() => libRef.current.click()} kind="ghost"><ImageIcon size={18} /> 從相簿選(可多張)</Btn>
+              <Btn onClick={() => libRef.current.click()} kind="ghost"><ImageIcon size={18} /> {isFood ? "從相簿選(可多張)" : "從相簿選"}</Btn>
               {isFood && (
                 <>
                   <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "6px 0 2px" }}>
