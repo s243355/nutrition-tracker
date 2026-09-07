@@ -175,8 +175,11 @@ async function analyzeExercise(base64, mediaType, weight) {
     {
       type: "text",
       text:
-        `分析運動照片或運動App截圖。使用者體重約 ${weight} 公斤,據此估算消耗。` +
-        '只回傳 JSON:{"activity":"運動類型(繁體中文)","duration_min":數字,"calories_burned":數字,"confidence":"high|medium|low"}。',
+        "這是運動 App(Apple 健康 / Strava / 健身器材等)的截圖或運動照片。" +
+        "若畫面上有顯示消耗熱量,請「直接讀取畫面數字」,不要自行估算。" +
+        "熱量優先取「動態大卡 / Active Calories」(運動額外消耗);若畫面只有「總大卡 / Total」,才用總量。" +
+        `只有在畫面完全沒有熱量數字時,才依運動類型、時長與體重(約 ${weight} 公斤)估算。` +
+        '只回傳 JSON:{"activity":"運動類型(繁體中文)","duration_min":數字,"calories_burned":數字(動態大卡優先),"source":"screen|estimate","confidence":"high|medium|low"}。',
     },
   ]);
   return parseObj(blocks);
@@ -1167,7 +1170,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
             onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
         )}
         {status === "result" && result && !isFood && (
-          <ResultCard title={result.activity} sub={`約 ${r0(result.duration_min)} 分鐘`} confidence={result.confidence}
+          <ResultCard title={result.activity} sub={[`約 ${r0(result.duration_min)} 分鐘`, result.source === "screen" ? "讀取畫面" : result.source === "estimate" ? "AI 估算" : ""].filter(Boolean).join(" · ")} confidence={result.confidence}
             rows={[["消耗熱量", `${r0(result.calories_burned)} kcal`]]}
             onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
         )}
