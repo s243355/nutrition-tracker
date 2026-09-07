@@ -1179,54 +1179,53 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
           <BarcodeView onResult={(data) => { setResult(data); setQty(1); setStatus("result"); }} />
         )}
 
-        {status === "batch" && (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-              <span style={{ fontSize: 13, color: C.sub }}>
-                逐項確認{isFood ? "、可調份數" : ""}
-                {batch.length ? ` · ${batch.filter((x) => x.added).length}/${batch.length} 已加入` : ""}
-              </span>
-              {batchNote && <span style={{ fontSize: 11.5, color: C.faint }}>{batchNote}</span>}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {batch.map((it) => (
-                <div key={it.id} style={{ display: "flex", gap: 12, alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 14, padding: 10, opacity: it.added ? 0.55 : 1 }}>
-                  {it.preview
-                    ? <img src={it.preview} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
-                    : <div style={{ width: 52, height: 52, borderRadius: 10, background: C.card, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Utensils size={20} color={C.faint} /></div>}
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    {it.status === "loading" && <div style={{ fontSize: 13, color: C.sub, display: "flex", alignItems: "center", gap: 8 }}><Loader2 size={15} color={C.cal} style={{ animation: "spin 1s linear infinite" }} /> 分析中…</div>}
-                    {it.status === "error" && <div style={{ fontSize: 13, color: C.warn }}>分析失敗</div>}
-                    {it.status === "done" && (
-                      <>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isFood ? it.data.food_name : it.data.activity}</div>
-                        <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
-                          {isFood
-                            ? `${r0(it.data.calories * (it.qty || 1))} kcal · P${r0(it.data.protein * (it.qty || 1))} C${r0(it.data.carbs * (it.qty || 1))} F${r0(it.data.fat * (it.qty || 1))}`
-                            : `${r0(it.data.calories_burned)} kcal`}
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  {it.status === "done" && !it.added && isFood && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-                      <button onClick={() => setItemQty(it.id, (it.qty || 1) - 1)} style={miniStep}>−</button>
-                      <span style={{ fontSize: 14, fontWeight: 700, minWidth: 16, textAlign: "center" }}>{it.qty || 1}</span>
-                      <button onClick={() => setItemQty(it.id, (it.qty || 1) + 1)} style={miniStep}>+</button>
+        {status === "batch" && (() => {
+          const ready = batch.filter((x) => x.status === "done");
+          const commit = () => { ready.forEach((it) => { if (!it.added) addBatchItem(it); }); onClose(); };
+          return (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span style={{ fontSize: 13, color: C.sub }}>以下{ready.length ? ` ${ready.length} ` : ""}項會被記錄{isFood ? "、可調份數" : ""}</span>
+                {batchNote && <span style={{ fontSize: 11.5, color: C.faint }}>{batchNote}</span>}
+              </div>
+              <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 12 }}>不要的按 🗑 移除,按「完成」全部記進今天</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {batch.map((it) => (
+                  <div key={it.id} style={{ display: "flex", gap: 12, alignItems: "center", border: `1px solid ${C.line}`, borderRadius: 14, padding: 10 }}>
+                    {it.preview
+                      ? <img src={it.preview} alt="" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                      : <div style={{ width: 52, height: 52, borderRadius: 10, background: C.card, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Utensils size={20} color={C.faint} /></div>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      {it.status === "loading" && <div style={{ fontSize: 13, color: C.sub, display: "flex", alignItems: "center", gap: 8 }}><Loader2 size={15} color={C.cal} style={{ animation: "spin 1s linear infinite" }} /> 分析中…</div>}
+                      {it.status === "error" && <div style={{ fontSize: 13, color: C.warn }}>分析失敗</div>}
+                      {it.status === "done" && (
+                        <>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isFood ? it.data.food_name : it.data.activity}</div>
+                          <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
+                            {isFood
+                              ? `${r0(it.data.calories * (it.qty || 1))} kcal · P${r0(it.data.protein * (it.qty || 1))} C${r0(it.data.carbs * (it.qty || 1))} F${r0(it.data.fat * (it.qty || 1))}`
+                              : `${r0(it.data.calories_burned)} kcal`}
+                          </div>
+                        </>
+                      )}
                     </div>
-                  )}
-                  {it.status === "done" && !it.added && <button onClick={() => addBatchItem(it)} style={miniAdd}>加入</button>}
-                  {it.added && <Check size={18} color={C.good} style={{ flexShrink: 0 }} />}
-                  {!it.added && <button onClick={() => removeBatch(it.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, flexShrink: 0 }}><Trash2 size={15} color={C.faint} /></button>}
-                </div>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-              <Btn kind="ghost" onClick={addAllBatch}><Check size={16} /> 全部加入</Btn>
-              <Btn kind="primary" onClick={onClose}>完成</Btn>
-            </div>
-          </>
-        )}
+                    {it.status === "done" && isFood && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                        <button onClick={() => setItemQty(it.id, (it.qty || 1) - 1)} style={miniStep}>−</button>
+                        <span style={{ fontSize: 14, fontWeight: 700, minWidth: 16, textAlign: "center" }}>{it.qty || 1}</span>
+                        <button onClick={() => setItemQty(it.id, (it.qty || 1) + 1)} style={miniStep}>+</button>
+                      </div>
+                    )}
+                    <button onClick={() => removeBatch(it.id)} style={{ background: "none", border: "none", cursor: "pointer", padding: 4, flexShrink: 0 }}><Trash2 size={15} color={C.faint} /></button>
+                  </div>
+                ))}
+              </div>
+              <Btn kind="primary" onClick={commit} style={{ marginTop: 16 }}>
+                <Check size={17} /> 完成{ready.length ? `,記錄 ${ready.length} 項` : ""}
+              </Btn>
+            </>
+          );
+        })()}
 
         {status === "manual" && (
           <ManualForm isFood={isFood} err={err} init={result}
