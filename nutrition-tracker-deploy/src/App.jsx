@@ -110,10 +110,14 @@ const API_URL =
 const MODEL =
   (typeof window !== "undefined" && window.__MODEL__ && window.__MODEL__.trim()) ||
   "claude-sonnet-4-5";
+const CHEAP_MODEL =
+  (typeof window !== "undefined" && window.__CHEAP_MODEL__ && window.__CHEAP_MODEL__.trim()) ||
+  "claude-haiku-4-5";
+const thrifty = () => { try { return localStorage.getItem("nutri:thrifty") === "1"; } catch { return false; } };
 const WEB_SEARCH = [{ type: "web_search_20250305", name: "web_search" }];
 
 async function claudeBlocks(content, tools) {
-  const body = { model: MODEL, max_tokens: 2000, messages: [{ role: "user", content }] };
+  const body = { model: thrifty() ? CHEAP_MODEL : MODEL, max_tokens: 2000, messages: [{ role: "user", content }] };
   if (tools) body.tools = tools;
   let resp;
   try {
@@ -148,11 +152,11 @@ async function analyzeFood(base64, mediaType) {
         "(1)若有營養標示表格,直接讀取熱量與蛋白質/碳水/脂肪,注意標示是每份或每100g,估算實際食用份量;" +
         "(2)若是包裝商品但無營養標示,辨識品名與品牌後上網搜尋該產品的營養資訊;" +
         "(3)若是無包裝食物,依外觀估算,多樣食物請加總。" +
-        '最後只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"portion":"份量說明","source":"label|web|estimate","note":"補充"}。單位為公克與大卡,用繁體中文。',
+        '最後只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"fiber":數字(膳食纖維g),"sodium":數字(鈉mg),"portion":"份量說明","source":"label|web|estimate","note":"補充"}。單位為公克與大卡(鈉為毫克),用繁體中文。',
     },
   ];
   let blocks;
-  try { blocks = await claudeBlocks(content, WEB_SEARCH); }
+  try { blocks = await claudeBlocks(content, thrifty() ? undefined : WEB_SEARCH); }
   catch { blocks = await claudeBlocks(content); } // 上網工具不可用時,退成純視覺估算
   return parseObj(blocks);
 }
@@ -162,10 +166,10 @@ async function analyzeFoodByName(name) {
     text:
       `你是營養分析助手,可用網路搜尋。使用者輸入的食物或商品名稱:「${name}」。` +
       "請上網查詢該產品/食物一份的營養資訊(找不到明確產品時,依常見版本估算)。" +
-      '只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"portion":"份量說明","source":"web|estimate","note":"補充(如查到的來源或份量假設)"}。單位為公克與大卡,用繁體中文。',
+      '只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"fiber":數字(膳食纖維g),"sodium":數字(鈉mg),"portion":"份量說明","source":"web|estimate","note":"補充(如查到的來源或份量假設)"}。單位為公克與大卡(鈉為毫克),用繁體中文。',
   }];
   let blocks;
-  try { blocks = await claudeBlocks(content, WEB_SEARCH); }
+  try { blocks = await claudeBlocks(content, thrifty() ? undefined : WEB_SEARCH); }
   catch { blocks = await claudeBlocks(content); }
   return parseObj(blocks);
 }
@@ -380,7 +384,7 @@ async function suggestWorkoutsAI({ equipment, needKcal, weight, targetLossKg }) 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: MODEL,
+      model: thrifty() ? CHEAP_MODEL : MODEL,
       max_tokens: 1000,
       messages: [{
         role: "user",
@@ -581,7 +585,7 @@ const PROFILE_DEFAULTS = {
   activity: 1.375, startDate: todayStr(), targetLossKg: 10, dietDeficit: 500,
   targetDate: addDays(todayStr(), PLAN_DAYS), exerciseGoal: 0,
   equipment: ["stair", "treadmill", "spin", "trainer"],
-  reminderOn: false, reminderTime: "20:00",
+  reminderOn: false, reminderTime: "20:00", thrifty: false,
 };
 function ProfileForm({ initial, onSave }) {
   const [f, setF] = useState(initial || { ...PROFILE_DEFAULTS });
@@ -896,11 +900,15 @@ function BarcodeView({ onResult }) {
       const p = j.product, n = p.nutriments || {};
       const per = n["energy-kcal_serving"] != null;
       const pick = (k) => (per ? n[`${k}_serving`] : n[`${k}_100g`]);
+      const fiberV = pick("fiber");
+      const sodiumG = pick("sodium"); // OFF 以公克計
       stopCam();
       onResult({
         food_name: p.product_name_zh || p.product_name || (p.brands ? `${p.brands} 商品` : "商品"),
         calories: r0(per ? n["energy-kcal_serving"] : n["energy-kcal_100g"]),
         protein: r0(pick("proteins")), carbs: r0(pick("carbohydrates")), fat: r0(pick("fat")),
+        fiber: fiberV != null ? r0(fiberV) : null,
+        sodium: sodiumG != null ? r0(sodiumG * 1000) : null,
         portion: per ? (p.serving_size || "每份") : "每 100 克",
         source: "barcode", note: "資料來源:Open Food Facts",
       });
@@ -999,7 +1007,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     const d = it.data;
     if (isFood) {
       const qn = it.qty || 1;
-      onAdd({ id: uid(), date: todayStr(), type: "food", name: qn > 1 ? `${d.food_name || "食物"} ×${qn}` : (d.food_name || "食物"), calories: r0(d.calories * qn), protein: r0(d.protein * qn), carbs: r0(d.carbs * qn), fat: r0(d.fat * qn) });
+      onAdd({ id: uid(), date: todayStr(), type: "food", name: qn > 1 ? `${d.food_name || "食物"} ×${qn}` : (d.food_name || "食物"), calories: r0(d.calories * qn), protein: r0(d.protein * qn), carbs: r0(d.carbs * qn), fat: r0(d.fat * qn), fiber: d.fiber != null ? r0(d.fiber * qn) : null, sodium: d.sodium != null ? r0(d.sodium * qn) : null });
     } else {
       onAdd({ id: uid(), date: todayStr(), type: "exercise", name: d.activity || "運動", burned: r0(d.calories_burned), duration: r0(d.duration_min) });
     }
@@ -1017,7 +1025,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
       if (!key) return;
       const cur = map.get(key) || { food_name: key, count: 0, last: -1, portion: "上次紀錄", source: "history" };
       cur.count += 1;
-      if (idx >= cur.last) { cur.last = idx; cur.calories = e.calories; cur.protein = e.protein; cur.carbs = e.carbs; cur.fat = e.fat; }
+      if (idx >= cur.last) { cur.last = idx; cur.calories = e.calories; cur.protein = e.protein; cur.carbs = e.carbs; cur.fat = e.fat; cur.fiber = e.fiber ?? null; cur.sodium = e.sodium ?? null; }
       map.set(key, cur);
     });
     return [...map.values()].sort((a, b) => b.count - a.count || b.last - a.last).slice(0, 20);
@@ -1025,7 +1033,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
 
   const [flash, setFlash] = useState(null);
   function addHistory(h, i) {
-    onAdd({ id: uid(), date: todayStr(), type: "food", name: h.food_name || "食物", calories: r0(h.calories), protein: r0(h.protein), carbs: r0(h.carbs), fat: r0(h.fat) });
+    onAdd({ id: uid(), date: todayStr(), type: "food", name: h.food_name || "食物", calories: r0(h.calories), protein: r0(h.protein), carbs: r0(h.carbs), fat: r0(h.fat), fiber: h.fiber ?? null, sodium: h.sodium ?? null });
     setFlash(i);
     setTimeout(() => setFlash((f) => (f === i ? null : f)), 900);
   }
@@ -1068,6 +1076,8 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
         name: label,
         calories: r0(result.calories * q), protein: r0(result.protein * q),
         carbs: r0(result.carbs * q), fat: r0(result.fat * q),
+        fiber: result.fiber != null ? r0(result.fiber * q) : null,
+        sodium: result.sodium != null ? r0(result.sodium * q) : null,
       });
     } else {
       onAdd({
@@ -1380,7 +1390,7 @@ function Countdown({ startDate, planDays, calRemaining }) {
     </div>
   );
 }
-function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, date, setDate, onEditEntry, onAddMany }) {
+function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, date, setDate, onEditEntry, onEvalEntry, onAddMany }) {
   const today = todayStr();
   const viewDate = date || today;
   const isToday = viewDate === today;
@@ -1512,7 +1522,7 @@ function Today({ profile, entries, plan, onRemove, openSheet, openMeal, streak, 
                 </div>
                 {rows.map((e) => (
                   <LogRow key={e.id} left={e.name} sub={`${e.time ? e.time + " · " : ""}P${e.protein} · C${e.carbs} · F${e.fat}`}
-                    right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEditEntry(e)} onRemove={() => onRemove(e.id)} />
+                    right={`${e.calories} kcal`} rightColor={C.cal} onClick={() => onEvalEntry(e)} onRemove={() => onRemove(e.id)} />
                 ))}
               </div>
             );
@@ -1777,11 +1787,37 @@ function Me({ profile, plan, onEdit, onUpdateProfile }) {
         拍照估算為概略值(通常誤差 ±20-30%),請把它當作趨勢參考而非精確數字。體重會隨水分波動,建議每週固定時間量一次、看長期曲線。若有慢性病或特殊狀況,開始前請先諮詢醫師或營養師。
       </div>
 
+      <SaveModeBox profile={profile} onUpdate={onUpdateProfile} />
+
       <ReminderBox profile={profile} onUpdate={onUpdateProfile} />
 
       <SyncBox />
 
       <Btn onClick={onEdit} kind="ghost" style={{ marginTop: 12 }}><Pencil size={16} /> 修改個人資料與目標</Btn>
+    </div>
+  );
+}
+function SaveModeBox({ profile, onUpdate }) {
+  const on = !!profile.thrifty;
+  function toggle() {
+    const next = !on;
+    try { localStorage.setItem("nutri:thrifty", next ? "1" : "0"); } catch {}
+    onUpdate({ thrifty: next });
+  }
+  return (
+    <div style={{ background: C.card, borderRadius: 16, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: C.ink }}>省錢模式</div>
+        <button onClick={toggle} style={{
+          width: 52, height: 30, borderRadius: 99, border: "none", cursor: "pointer", position: "relative",
+          background: on ? C.good : C.line, transition: "background .2s",
+        }}>
+          <span style={{ position: "absolute", top: 3, left: on ? 25 : 3, width: 24, height: 24, borderRadius: 99, background: "#fff", transition: "left .2s" }} />
+        </button>
+      </div>
+      <div style={{ fontSize: 11.5, color: C.faint, lineHeight: 1.6, marginTop: 10 }}>
+        開啟後,所有 AI 分析改用便宜的模型,並關閉食物「上網查」(改用純視覺估算/讀標示)。條碼、吃過的清單、手動記錄本來就不花錢。想要更準時再關掉即可。
+      </div>
     </div>
   );
 }
@@ -1990,6 +2026,64 @@ function SyncBadge() {
   );
 }
 
+function mealScore(e, plan) {
+  const cal = e.calories || 0, p = e.protein || 0, f = e.fat || 0;
+  const fiber = e.fiber, sodium = e.sodium;
+  let s = 5; const notes = [];
+  const pd = cal > 0 ? p / (cal / 100) : 0; // 每 100 kcal 的蛋白質克數
+  if (pd >= 8 || p >= 30) s += 2; else if (pd >= 5 || p >= 20) s += 1; else { s -= 1; notes.push("蛋白質偏少"); }
+  const fatShare = cal > 0 ? (f * 9) / cal : 0;
+  if (fatShare > 0.45) { s -= 1; notes.push("脂肪比例偏高"); }
+  if (fiber != null) { if (fiber >= 5) s += 1; else if (fiber < 3) { s -= 1; notes.push("纖維不足"); } }
+  if (sodium != null) { if (sodium > 1200) { s -= 2; notes.push("鈉偏高"); } else if (sodium > 800) { s -= 1; notes.push("鈉略高"); } }
+  if (plan && plan.intakeTarget && cal / plan.intakeTarget > 0.6) { s -= 1; notes.push("單餐熱量偏高"); }
+  return { score: Math.max(0, Math.min(10, Math.round(s))), notes };
+}
+function EvalSheet({ entry, plan, onEdit, onClose }) {
+  const { score, notes } = mealScore(entry, plan);
+  const col = score >= 7 ? C.good : score >= 4 ? C.carbs : C.warn;
+  const verdict = score >= 8 ? "吃得不錯,繼續保持!" : score >= 5 ? "還可以,注意下面幾點就更好。" : "這餐較不均衡,下一餐補回來。";
+  const pct = (v, t) => (t ? Math.round((v / t) * 100) : null);
+  const row = (label, val, unit, tv) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
+      <span style={{ fontSize: 14, color: C.sub }}>{label}</span>
+      <span style={{ fontSize: 14, color: C.ink, fontWeight: 600 }}>
+        {r0(val)}{unit}{tv ? <span style={{ color: C.faint, fontWeight: 400 }}> / {r0(tv)}{unit} ({pct(val, tv)}%)</span> : null}
+      </span>
+    </div>
+  );
+  return (
+    <Sheet title="這餐評價" onClose={onClose}>
+      <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, marginBottom: 4 }}>{entry.name}</div>
+      {(entry.meal || entry.time) && <div style={{ fontSize: 12, color: C.faint, marginBottom: 12 }}>{[entry.meal ? entry.meal + "餐" : "", entry.time].filter(Boolean).join(" · ")}</div>}
+      <div style={{ marginBottom: 14 }}>
+        {row("熱量", entry.calories, " kcal", plan && plan.intakeTarget)}
+        {row("蛋白質", entry.protein, " g", plan && plan.proteinTarget)}
+        {row("碳水", entry.carbs, " g", plan && plan.carbTarget)}
+        {row("脂肪", entry.fat, " g", plan && plan.fatTarget)}
+        {entry.fiber != null && row("膳食纖維", entry.fiber, " g", null)}
+        {entry.sodium != null && row("鈉", entry.sodium, " mg", null)}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 14px", background: C.card, borderRadius: 12 }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: C.ink }}>飲食均衡分</span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 99, background: col, display: "inline-block" }} />
+          <span style={{ fontSize: 18, fontWeight: 700, color: col }}>{score}/10</span>
+        </span>
+      </div>
+      <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.6, marginTop: 12 }}>
+        {verdict}{notes.length ? " " + notes.join("、") + "。" : ""}
+      </div>
+      {(entry.fiber == null && entry.sodium == null) && (
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8 }}>這筆沒有纖維/鈉資料(手動輸入的);用拍照或條碼記錄會更完整。</div>
+      )}
+      <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+        <Btn kind="ghost" onClick={onEdit}><Pencil size={16} /> 編輯</Btn>
+        <Btn kind="primary" onClick={onClose}>完成</Btn>
+      </div>
+    </Sheet>
+  );
+}
 function EditSheet({ entry, onSave, onDelete, onClose }) {
   const isFood = entry.type === "food";
   const [v, setV] = useState(
@@ -2054,6 +2148,7 @@ export default function App() {
   const [bcOpen, setBcOpen] = useState(false);
   const [selDate, setSelDate] = useState(todayStr()); // 目前檢視/記錄的日期
   const [editEntry, setEditEntry] = useState(null);
+  const [evalEntry, setEvalEntry] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -2062,7 +2157,7 @@ export default function App() {
       const w = await store.get("weights");
       const bc = await store.get("bodycomp");
       // 向前相容:舊資料缺的新欄位自動補預設,既有值一律保留
-      if (p) setProfile({ ...PROFILE_DEFAULTS, ...p, targetDate: p.targetDate || addDays(p.startDate || todayStr(), PLAN_DAYS) });
+      if (p) { const merged = { ...PROFILE_DEFAULTS, ...p, targetDate: p.targetDate || addDays(p.startDate || todayStr(), PLAN_DAYS) }; setProfile(merged); try { localStorage.setItem("nutri:thrifty", merged.thrifty ? "1" : "0"); } catch {} }
       if (Array.isArray(e)) setEntries(e);
       if (Array.isArray(w)) setWeights(w);
       if (Array.isArray(bc)) setBodyComp(bc);
@@ -2186,7 +2281,7 @@ export default function App() {
         <div style={{ marginLeft: "auto" }}><SyncBadge /></div>
       </div>
 
-      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} date={selDate} setDate={setSelDate} onEditEntry={setEditEntry} onAddMany={addEntries} />}
+      {tab === "today" && <Today profile={profile} entries={entries} plan={plan} onRemove={removeEntry} openSheet={setSheet} openMeal={setMealData} streak={streak} date={selDate} setDate={setSelDate} onEditEntry={setEditEntry} onEvalEntry={setEvalEntry} onAddMany={addEntries} />}
       {tab === "suggest" && <Suggest profile={profile} entries={entries} plan={plan} weight={currentWeight} onAdd={addEntry} onUpdateProfile={updateProfile} openSheet={setSheet} />}
       {tab === "progress" && <Progress profile={profile} entries={entries} weights={weights} plan={plan} onAddWeight={addWeight} bodyComp={bodyComp} openBodyComp={() => setBcOpen(true)} />}
       {tab === "me" && <Me profile={profile} plan={plan} onEdit={() => setEditing(true)} onUpdateProfile={updateProfile} />}
@@ -2210,6 +2305,7 @@ export default function App() {
       {mealData && <MealSheet remaining={mealData} onAdd={addEntry} onClose={() => setMealData(null)} />}
       {bcOpen && <BodyCompSheet profile={profile} plan={plan} previous={latestBodyComp} onSave={addBodyComp} onClose={() => setBcOpen(false)} />}
       {editEntry && <EditSheet entry={editEntry} onSave={(patch) => { updateEntry(editEntry.id, patch); setEditEntry(null); }} onDelete={() => { removeEntry(editEntry.id); setEditEntry(null); }} onClose={() => setEditEntry(null)} />}
+      {evalEntry && <EvalSheet entry={evalEntry} plan={plan} onEdit={() => { setEditEntry(evalEntry); setEvalEntry(null); }} onClose={() => setEvalEntry(null)} />}
       <style>{`@keyframes spin{to{transform:rotate(360deg)}} *{-webkit-tap-highlight-color:transparent}`}</style>
     </Shell>
   );
