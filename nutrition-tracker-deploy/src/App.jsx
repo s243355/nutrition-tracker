@@ -96,6 +96,37 @@ function fileToBase64(file) {
     r.readAsDataURL(file);
   });
 }
+/* 上傳前先壓縮:手機照片常有 3–5MB,base64 後會超過伺服器上限(413)。
+   縮到長邊 1024、JPEG 0.8,辨識品質足夠,體積約小 10 倍。 */
+function compressImage(file, maxSide = 1024, quality = 0.8) {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const cv = document.createElement("canvas");
+          cv.width = w; cv.height = h;
+          cv.getContext("2d").drawImage(img, 0, 0, w, h);
+          const dataUrl = cv.toDataURL("image/jpeg", quality);
+          URL.revokeObjectURL(url);
+          resolve({ base64: dataUrl.split(",")[1], mediaType: "image/jpeg" });
+        } catch { URL.revokeObjectURL(url); resolve(null); }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+      img.src = url;
+    } catch { resolve(null); }
+  });
+}
+// 取得可上傳的影像資料:優先壓縮,失敗才用原檔
+async function imagePayload(file) {
+  const c = await compressImage(file);
+  if (c && c.base64) return c;
+  return { base64: await fileToBase64(file), mediaType: file.type || "image/jpeg" };
+}
 function looseJSON(text) {
   const clean = text.replace(/```json|```/g, "").trim();
   const s = clean.indexOf("{");
@@ -137,7 +168,10 @@ async function callClaudeModel(model, content, tools) {
     resp = await fetch(API_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   } catch (e) { throw new Error("連線失敗:" + (e.message || "網路錯誤") + "(檢查 " + API_URL + ")"); }
   const raw = await resp.text();
-  if (!resp.ok) throw new Error(`AI 端點回傳 ${resp.status}:${raw.slice(0, 140)}`);
+  if (!resp.ok) {
+    if (resp.status === 413) throw new Error("照片太大,伺服器拒收(413)。請重試,系統會自動壓縮;若仍失敗請改拍解析度較低的照片。");
+    throw new Error(`AI 端點回傳 ${resp.status}:${raw.slice(0, 140)}`);
+  }
   let data;
   try { data = JSON.parse(raw); } catch { throw new Error("端點回應不是 JSON(可能 /api/messages 未部署):" + raw.slice(0, 100)); }
   if (data.error) throw new Error("API 錯誤:" + String(data.error.message || JSON.stringify(data.error)).slice(0, 160));
@@ -812,7 +846,8 @@ function BodyCompSheet({ profile, plan, previous, onSave, onClose }) {
     setPreview(URL.createObjectURL(file));
     setPhase("loading");
     try {
-      const res = await analyzeBodyComp(await fileToBase64(file), file.type || "image/jpeg");
+      const im = await imagePayload(file);
+      const res = await analyzeBodyComp(im.base64, im.mediaType);
       setD({
         weight: res.weight ?? "", body_fat: res.body_fat ?? "", skeletal_muscle: res.skeletal_muscle ?? "", muscle_mass: res.muscle_mass ?? "",
         bmi: res.bmi ?? "", visceral_fat: res.visceral_fat ?? "", body_water: res.body_water ?? "", bmr: res.bmr ?? "",
@@ -996,8 +1031,8 @@ function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
   async function runBatchItem(it) {
     setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "loading", error: "" } : x)));
     try {
-      const b64 = await fileToBase64(it.file);
-      const mt = it.file.type || "image/jpeg";
+      const im = await imagePayload(it.file);
+      const b64 = im.base64, mt = im.mediaType;
       const data = isFood ? await analyzeFood(b64, mt) : await analyzeExercise(b64, mt, profile.startWeight);
       setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "done", data } : x)));
     } catch (e) {
@@ -1087,8 +1122,8 @@ function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
     setStatus("loading");
     setErr("");
     try {
-      const b64 = await fileToBase64(file);
-      const mt = file.type || "image/jpeg";
+      const im = await imagePayload(file);
+      const b64 = im.base64, mt = im.mediaType;
       const res = isFood
         ? await analyzeFood(b64, mt)
         : await analyzeExercise(b64, mt, profile.startWeight);
