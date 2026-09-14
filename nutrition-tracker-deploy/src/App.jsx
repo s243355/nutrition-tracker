@@ -151,8 +151,9 @@ async function analyzeFood(base64, mediaType) {
         "你是營養分析助手,可用網路搜尋。判斷圖片並依序處理:" +
         "(1)若有營養標示表格,直接讀取熱量與蛋白質/碳水/脂肪,注意標示是每份或每100g,估算實際食用份量;" +
         "(2)若是包裝商品但無營養標示,辨識品名與品牌後上網搜尋該產品的營養資訊;" +
-        "(3)若是無包裝食物,依外觀估算,多樣食物請加總。" +
-        '最後只回傳 JSON:{"food_name":"品名","calories":數字,"protein":數字,"carbs":數字,"fat":數字,"fiber":數字(膳食纖維g),"sodium":數字(鈉mg),"portion":"份量說明","source":"label|web|estimate","note":"補充"}。單位為公克與大卡(鈉為毫克),用繁體中文。',
+        "(3)若是無包裝食物,依外觀估算。" +
+        "請「逐項拆解」畫面中的每樣食物(例如麵、肉、湯、配菜、醬料、飲料分開列),每項估出重量(公克)與該項的熱量與三大營養素;總量為各項加總。" +
+        '只回傳 JSON:{"food_name":"整餐名稱","items":[{"name":"食材名","grams":數字,"calories":數字,"protein":數字,"carbs":數字,"fat":數字}],"calories":數字(總),"protein":數字,"carbs":數字,"fat":數字,"fiber":數字(膳食纖維g),"sodium":數字(鈉mg),"portion":"份量說明","source":"label|web|estimate","note":"補充"}。單位為公克與大卡(鈉為毫克),用繁體中文。',
     },
   ];
   let blocks;
@@ -964,7 +965,7 @@ function BarcodeView({ onResult }) {
 /* ------------------------------------------------------------------ */
 /*  拍照分析(食物 / 運動共用)                                        */
 /* ------------------------------------------------------------------ */
-function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
+function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
   const isFood = mode === "food";
   const [status, setStatus] = useState("idle"); // idle | loading | result | error | manual
   const [preview, setPreview] = useState(null);
@@ -1007,7 +1008,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     const d = it.data;
     if (isFood) {
       const qn = it.qty || 1;
-      onAdd({ id: uid(), date: todayStr(), type: "food", name: qn > 1 ? `${d.food_name || "食物"} ×${qn}` : (d.food_name || "食物"), calories: r0(d.calories * qn), protein: r0(d.protein * qn), carbs: r0(d.carbs * qn), fat: r0(d.fat * qn), fiber: d.fiber != null ? r0(d.fiber * qn) : null, sodium: d.sodium != null ? r0(d.sodium * qn) : null });
+      onAdd({ id: uid(), date: todayStr(), type: "food", name: qn > 1 ? `${d.food_name || "食物"} ×${qn}` : (d.food_name || "食物"), calories: r0(d.calories * qn), protein: r0(d.protein * qn), carbs: r0(d.carbs * qn), fat: r0(d.fat * qn), fiber: d.fiber != null ? r0(d.fiber * qn) : null, sodium: d.sodium != null ? r0(d.sodium * qn) : null, items: Array.isArray(d.items) && d.items.length ? d.items.map((x) => ({ ...x })) : null });
     } else {
       onAdd({ id: uid(), date: todayStr(), type: "exercise", name: d.activity || "運動", burned: r0(d.calories_burned), duration: r0(d.duration_min) });
     }
@@ -1032,6 +1033,24 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
   }, [entries, isFood]);
 
   const [flash, setFlash] = useState(null);
+  const [items, setItems] = useState(null); // 逐項拆解([{name,grams,calories,protein,carbs,fat}])
+  const sumItems = (arr) => (arr || []).reduce((s, x) => ({
+    calories: s.calories + (+x.calories || 0), protein: s.protein + (+x.protein || 0),
+    carbs: s.carbs + (+x.carbs || 0), fat: s.fat + (+x.fat || 0),
+  }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const setItem = (i, patch) => setItems((prev) => prev.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const delItem = (i) => setItems((prev) => prev.filter((_, j) => j !== i));
+  const addItem = () => setItems((prev) => [...(prev || []), { name: "新項目", grams: 100, calories: 0, protein: 0, carbs: 0, fat: 0 }]);
+  // 依公克數等比例調整該項營養(使用者改重量時)
+  function scaleItem(i, newG) {
+    setItems((prev) => prev.map((x, j) => {
+      if (j !== i) return x;
+      const oldG = +x.grams || 0; const g = Math.max(0, +newG || 0);
+      if (!oldG) return { ...x, grams: g };
+      const k = g / oldG;
+      return { ...x, grams: g, calories: r0(x.calories * k), protein: r0(x.protein * k), carbs: r0(x.carbs * k), fat: r0(x.fat * k) };
+    }));
+  }
   function addHistory(h, i) {
     onAdd({ id: uid(), date: todayStr(), type: "food", name: h.food_name || "食物", calories: r0(h.calories), protein: r0(h.protein), carbs: r0(h.carbs), fat: r0(h.fat), fiber: h.fiber ?? null, sodium: h.sodium ?? null });
     setFlash(i);
@@ -1042,7 +1061,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     const name = q.trim();
     if (!name) return;
     setPreview(null); setStatus("loading"); setErr("");
-    try { setResult(await analyzeFoodByName(name)); setQty(1); setStatus("result"); }
+    try { const rr = await analyzeFoodByName(name); setResult(rr); setItems(Array.isArray(rr.items) && rr.items.length ? rr.items : null); setQty(1); setStatus("result"); }
     catch (e) { setErr((e && e.message) || "查詢失敗,可以改用手動輸入。"); setStatus("manual"); }
   }
 
@@ -1059,6 +1078,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
         ? await analyzeFood(b64, mt)
         : await analyzeExercise(b64, mt, profile.startWeight);
       setResult(res);
+      setItems(isFood && Array.isArray(res.items) && res.items.length ? res.items : null);
       setQty(1);
       setStatus("result");
     } catch (e2) {
@@ -1071,13 +1091,15 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
     if (isFood) {
       const q = qty || 1;
       const label = q > 1 ? `${result.food_name || "食物"} ×${q}` : (result.food_name || "食物");
+      const t = items && items.length ? sumItems(items) : { calories: result.calories, protein: result.protein, carbs: result.carbs, fat: result.fat };
       onAdd({
         id: uid(), date: todayStr(), type: "food",
         name: label,
-        calories: r0(result.calories * q), protein: r0(result.protein * q),
-        carbs: r0(result.carbs * q), fat: r0(result.fat * q),
+        calories: r0(t.calories * q), protein: r0(t.protein * q),
+        carbs: r0(t.carbs * q), fat: r0(t.fat * q),
         fiber: result.fiber != null ? r0(result.fiber * q) : null,
         sodium: result.sodium != null ? r0(result.sodium * q) : null,
+        items: items && items.length ? items.map((x) => ({ ...x })) : null,
       });
     } else {
       onAdd({
@@ -1173,12 +1195,42 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
           </div>
         )}
 
-        {status === "result" && result && isFood && (
-          <ResultCard title={result.food_name} sub={[result.portion, srcLabel(result.source)].filter(Boolean).join(" · ")} confidence={result.confidence}
-            qty={qty} setQty={setQty}
-            rows={[["熱量", `${r0(result.calories * qty)} kcal`], ["蛋白質", `${r0(result.protein * qty)} g`], ["澱粉", `${r0(result.carbs * qty)} g`], ["脂肪", `${r0(result.fat * qty)} g`]]}
-            onConfirm={confirm} onRetry={() => setStatus("idle")} onEdit={() => setStatus("manual")} />
-        )}
+        {status === "result" && result && isFood && (() => {
+          const t = items && items.length ? sumItems(items) : result;
+          return (
+            <ResultCard title={result.food_name} sub={[result.portion, srcLabel(result.source)].filter(Boolean).join(" · ")} confidence={result.confidence}
+              qty={qty} setQty={setQty}
+              rows={[["熱量", `${r0(t.calories * qty)} kcal`], ["蛋白質", `${r0(t.protein * qty)} g`], ["澱粉", `${r0(t.carbs * qty)} g`], ["脂肪", `${r0(t.fat * qty)} g`]]}
+              extra={
+                <>
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+                    <div style={{ height: 8, background: C.line, borderRadius: 99, overflow: "hidden" }}>
+                      <div style={{ height: 8, width: `${Math.max(0, Math.min(100, ((t.calories * qty) / (plan && plan.intakeTarget ? plan.intakeTarget / 3 : 800)) * 100))}%`, background: C.good, borderRadius: 99 }} />
+                    </div>
+                    <div style={{ fontSize: 11.5, color: C.faint, marginTop: 6 }}>與一餐參考量約 {r0(plan && plan.intakeTarget ? plan.intakeTarget / 3 : 800)} 大卡比較</div>
+                  </div>
+                  <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 600, color: C.sub, marginBottom: 8 }}>逐項明細(可改重量或刪除)</div>
+                  {(items || []).map((it, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderBottom: `1px solid ${C.line}` }}>
+                      <input value={it.name} onChange={(e) => setItem(i, { name: e.target.value })}
+                        style={{ ...inputStyle, flex: 1, minWidth: 0, padding: "6px 8px", fontSize: 13 }} />
+                      <input type="number" value={it.grams ?? ""} onChange={(e) => scaleItem(i, e.target.value)}
+                        style={{ ...inputStyle, width: 62, padding: "6px 8px", fontSize: 13, textAlign: "right" }} />
+                      <span style={{ fontSize: 12, color: C.faint }}>g</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: C.cal, width: 62, textAlign: "right" }}>{r0(it.calories)}</span>
+                      <button onClick={() => delItem(i)} style={{ background: "none", border: "none", cursor: "pointer", padding: 2 }}><Trash2 size={14} color={C.faint} /></button>
+                    </div>
+                  ))}
+                  <button onClick={addItem} style={{ background: "none", border: "none", color: C.cal, fontSize: 13, cursor: "pointer", fontFamily: FONT, marginTop: 10, padding: 0 }}>
+                    ＋ 新增食物
+                  </button>
+                  </div>
+                </>
+              }
+              onConfirm={confirm} onRetry={() => { setItems(null); setStatus("idle"); }} onEdit={() => setStatus("manual")} />
+          );
+        })()}
         {status === "result" && result && !isFood && (
           <ResultCard title={result.activity} sub={[`約 ${r0(result.duration_min)} 分鐘`, result.source === "screen" ? "讀取畫面" : result.source === "estimate" ? "AI 估算" : ""].filter(Boolean).join(" · ")} confidence={result.confidence}
             rows={[["消耗熱量", `${r0(result.calories_burned)} kcal`]]}
@@ -1246,7 +1298,7 @@ function CaptureSheet({ mode, profile, entries, onAdd, onClose }) {
   );
 }
 
-function ResultCard({ title, sub, rows, confidence, qty, setQty, onConfirm, onRetry, onEdit }) {
+function ResultCard({ title, sub, rows, confidence, qty, setQty, extra, onConfirm, onRetry, onEdit }) {
   const conf = { high: ["估算可信度高", C.good], medium: ["估算為概略值", C.carbs], low: ["照片較模糊,建議手動校正", C.warn] }[confidence] || ["", C.sub];
   const stepBtn = (label, fn, disabled) => (
     <button onClick={fn} disabled={disabled} style={{
@@ -1278,6 +1330,7 @@ function ResultCard({ title, sub, rows, confidence, qty, setQty, onConfirm, onRe
             </div>
           ))}
         </div>
+        {extra}
         {conf[0] && <div style={{ fontSize: 12, color: conf[1], marginTop: 12 }}>● {conf[0]}</div>}
       </div>
       <Btn onClick={onConfirm} kind="accent" style={{ marginBottom: 8 }}><Check size={18} /> 加入紀錄</Btn>
@@ -2026,6 +2079,18 @@ function SyncBadge() {
   );
 }
 
+async function coachComment({ name, items, totals, plan }) {
+  const list = (items || []).map((x) => `${x.name}${x.grams ? ` ${r0(x.grams)}g` : ""} ${r0(x.calories)}大卡`).join("、") || "(未拆項)";
+  const blocks = await claudeBlocks([{
+    type: "text",
+    text:
+      `使用者正在減脂。這餐:「${name}」,組成:${list}。` +
+      `總計 ${r0(totals.calories)} 大卡、蛋白質 ${r0(totals.protein)}g、碳水 ${r0(totals.carbs)}g、脂肪 ${r0(totals.fat)}g。` +
+      (plan ? `他每日目標約 ${r0(plan.intakeTarget)} 大卡、蛋白質 ${r0(plan.proteinTarget)}g。` : "") +
+      "請用像健身教練朋友的口吻,繁體中文寫 2–4 句評語:先肯定做得好的地方,再給一個具體可執行的小建議(例如補蛋白質、加蔬菜、下一餐怎麼配)。語氣親切自然、正向,不要說教、不要列點、不要用 JSON,只回傳純文字。",
+  }]);
+  return blocks.join("\n").trim();
+}
 function mealScore(e, plan) {
   const cal = e.calories || 0, p = e.protein || 0, f = e.fat || 0;
   const fiber = e.fiber, sodium = e.sodium;
@@ -2044,6 +2109,21 @@ function EvalSheet({ entry, plan, onEdit, onClose }) {
   const col = score >= 7 ? C.good : score >= 4 ? C.carbs : C.warn;
   const verdict = score >= 8 ? "吃得不錯,繼續保持!" : score >= 5 ? "還可以,注意下面幾點就更好。" : "這餐較不均衡,下一餐補回來。";
   const pct = (v, t) => (t ? Math.round((v / t) * 100) : null);
+  const [coach, setCoach] = useState("");
+  const [loading, setLoading] = useState(false);
+  // 參考餐:每日目標的三分之一(約一餐),沒有計畫時用 800 大卡
+  const refCal = plan && plan.intakeTarget ? Math.round(plan.intakeTarget / 3) : 800;
+  const barPct = Math.max(0, Math.min(100, ((entry.calories || 0) / refCal) * 100));
+  async function gen() {
+    setLoading(true);
+    try {
+      setCoach(await coachComment({
+        name: entry.name, items: entry.items,
+        totals: { calories: entry.calories, protein: entry.protein, carbs: entry.carbs, fat: entry.fat }, plan,
+      }));
+    } catch (e) { setCoach((e && e.message) || "評語產生失敗,請稍後再試。"); }
+    setLoading(false);
+  }
   const row = (label, val, unit, tv) => (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", borderBottom: `1px solid ${C.line}` }}>
       <span style={{ fontSize: 14, color: C.sub }}>{label}</span>
@@ -2056,6 +2136,30 @@ function EvalSheet({ entry, plan, onEdit, onClose }) {
     <Sheet title="這餐評價" onClose={onClose}>
       <div style={{ fontSize: 17, fontWeight: 700, color: C.ink, marginBottom: 4 }}>{entry.name}</div>
       {(entry.meal || entry.time) && <div style={{ fontSize: 12, color: C.faint, marginBottom: 12 }}>{[entry.meal ? entry.meal + "餐" : "", entry.time].filter(Boolean).join(" · ")}</div>}
+
+      {/* 份量參考比較條 */}
+      <div style={{ background: C.card, borderRadius: 14, padding: 16, marginBottom: 14 }}>
+        <div style={{ fontSize: 12, color: C.sub }}>熱量</div>
+        <div style={{ fontSize: 32, fontWeight: 700, color: C.ink, lineHeight: 1.1, margin: "2px 0 10px" }}>
+          {r0(entry.calories)}<span style={{ fontSize: 15, color: C.sub, fontWeight: 400 }}> 大卡</span>
+        </div>
+        <div style={{ height: 8, background: C.line, borderRadius: 99, overflow: "hidden" }}>
+          <div style={{ height: 8, width: `${barPct}%`, background: barPct > 100 ? C.warn : C.good, borderRadius: 99 }} />
+        </div>
+        <div style={{ fontSize: 11.5, color: C.faint, marginTop: 7 }}>與你的一餐參考量約 {refCal} 大卡比較</div>
+      </div>
+
+      {Array.isArray(entry.items) && entry.items.length > 0 && (
+        <div style={{ background: C.card, borderRadius: 12, padding: 12, marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: C.sub, marginBottom: 8 }}>組成明細</div>
+          {entry.items.map((it, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: C.ink, padding: "3px 0" }}>
+              <span>{it.name}{it.grams ? ` · ${r0(it.grams)}g` : ""}</span>
+              <span style={{ color: C.cal, fontWeight: 600 }}>{r0(it.calories)} kcal</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div style={{ marginBottom: 14 }}>
         {row("熱量", entry.calories, " kcal", plan && plan.intakeTarget)}
         {row("蛋白質", entry.protein, " g", plan && plan.proteinTarget)}
@@ -2074,6 +2178,15 @@ function EvalSheet({ entry, plan, onEdit, onClose }) {
       <div style={{ fontSize: 13.5, color: C.ink, lineHeight: 1.6, marginTop: 12 }}>
         {verdict}{notes.length ? " " + notes.join("、") + "。" : ""}
       </div>
+
+      {coach && (
+        <div style={{ background: C.card, borderRadius: 12, padding: 14, marginTop: 12, fontSize: 13.5, color: C.ink, lineHeight: 1.65, whiteSpace: "pre-wrap" }}>
+          {coach}
+        </div>
+      )}
+      <Btn kind="ghost" onClick={gen} style={{ marginTop: 12 }}>
+        {loading ? <Loader2 size={16} style={{ animation: "spin 1s linear infinite" }} /> : <Sparkles size={16} />} {coach ? "重新產生綜合分析" : "產生教練評語"}
+      </Btn>
       {(entry.fiber == null && entry.sodium == null) && (
         <div style={{ fontSize: 11.5, color: C.faint, marginTop: 8 }}>這筆沒有纖維/鈉資料(手動輸入的);用拍照或條碼記錄會更完整。</div>
       )}
@@ -2301,7 +2414,7 @@ export default function App() {
         ))}
       </div>
 
-      {sheet && <CaptureSheet mode={sheet} profile={profile} entries={entries} onAdd={addEntry} onClose={() => setSheet(null)} />}
+      {sheet && <CaptureSheet mode={sheet} profile={profile} entries={entries} plan={plan} onAdd={addEntry} onClose={() => setSheet(null)} />}
       {mealData && <MealSheet remaining={mealData} onAdd={addEntry} onClose={() => setMealData(null)} />}
       {bcOpen && <BodyCompSheet profile={profile} plan={plan} previous={latestBodyComp} onSave={addBodyComp} onClose={() => setBcOpen(false)} />}
       {editEntry && <EditSheet entry={editEntry} onSave={(patch) => { updateEntry(editEntry.id, patch); setEditEntry(null); }} onDelete={() => { removeEntry(editEntry.id); setEditEntry(null); }} onClose={() => setEditEntry(null)} />}
