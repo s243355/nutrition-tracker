@@ -117,7 +117,20 @@ const thrifty = () => { try { return localStorage.getItem("nutri:thrifty") === "
 const WEB_SEARCH = [{ type: "web_search_20250305", name: "web_search" }];
 
 async function claudeBlocks(content, tools) {
-  const body = { model: thrifty() ? CHEAP_MODEL : MODEL, max_tokens: 2000, messages: [{ role: "user", content }] };
+  const primary = thrifty() ? CHEAP_MODEL : MODEL;
+  try { return await callClaudeModel(primary, content, tools); }
+  catch (e) {
+    const msg = String((e && e.message) || "");
+    // 模型代號無效時,自動換另一個模型再試一次
+    if (/model/i.test(msg) && /(not_found|invalid|does not exist|404|400)/i.test(msg)) {
+      const alt = primary === CHEAP_MODEL ? MODEL : CHEAP_MODEL;
+      if (alt !== primary) return await callClaudeModel(alt, content, tools);
+    }
+    throw e;
+  }
+}
+async function callClaudeModel(model, content, tools) {
+  const body = { model, max_tokens: 2000, messages: [{ role: "user", content }] };
   if (tools) body.tools = tools;
   let resp;
   try {
@@ -980,6 +993,19 @@ function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
   const miniStep = { width: 28, height: 28, borderRadius: 8, border: `1px solid ${C.line}`, background: C.bg, color: C.ink, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: FONT, lineHeight: 1 };
   const miniAdd = { background: C.ink, color: "#fff", border: "none", borderRadius: 9, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: FONT, flexShrink: 0 };
 
+  async function runBatchItem(it) {
+    setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "loading", error: "" } : x)));
+    try {
+      const b64 = await fileToBase64(it.file);
+      const mt = it.file.type || "image/jpeg";
+      const data = isFood ? await analyzeFood(b64, mt) : await analyzeExercise(b64, mt, profile.startWeight);
+      setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "done", data } : x)));
+    } catch (e) {
+      const msg = (e && e.message) || "分析失敗";
+      setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "error", error: msg } : x)));
+    }
+  }
+
   async function handleLibrary(e) {
     const all = Array.from(e.target.files || []);
     if (!all.length) return;
@@ -987,18 +1013,7 @@ function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
     setBatchNote(all.length > 5 ? "一次最多 5 張,已取前 5 張" : "");
     const items = files.map((f) => ({ id: uid(), preview: URL.createObjectURL(f), file: f, status: "loading", data: null, qty: 1, added: false }));
     setBatch(items); setPreview(null); setErr(""); setStatus("batch");
-    items.forEach((it) => {
-      (async () => {
-        try {
-          const b64 = await fileToBase64(it.file);
-          const mt = it.file.type || "image/jpeg";
-          const data = isFood ? await analyzeFood(b64, mt) : await analyzeExercise(b64, mt, profile.startWeight);
-          setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "done", data } : x)));
-        } catch {
-          setBatch((prev) => prev.map((x) => (x.id === it.id ? { ...x, status: "error" } : x)));
-        }
-      })();
-    });
+    items.forEach((it) => runBatchItem(it));
     e.target.value = "";
   }
   const setItemQty = (id, v) => setBatch((prev) => prev.map((x) => (x.id === id ? { ...x, qty: Math.max(1, v) } : x)));
@@ -1259,7 +1274,13 @@ function CaptureSheet({ mode, profile, entries, plan, onAdd, onClose }) {
                       : <div style={{ width: 52, height: 52, borderRadius: 10, background: C.card, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Utensils size={20} color={C.faint} /></div>}
                     <div style={{ flex: 1, minWidth: 0 }}>
                       {it.status === "loading" && <div style={{ fontSize: 13, color: C.sub, display: "flex", alignItems: "center", gap: 8 }}><Loader2 size={15} color={C.cal} style={{ animation: "spin 1s linear infinite" }} /> 分析中…</div>}
-                      {it.status === "error" && <div style={{ fontSize: 13, color: C.warn }}>分析失敗</div>}
+                      {it.status === "error" && (
+                        <div>
+                          <div style={{ fontSize: 13, color: C.warn, fontWeight: 600 }}>分析失敗</div>
+                          {it.error && <div style={{ fontSize: 11, color: C.faint, marginTop: 3, lineHeight: 1.45, wordBreak: "break-all" }}>{String(it.error).slice(0, 160)}</div>}
+                          <button onClick={() => runBatchItem(it)} style={{ background: "none", border: "none", color: C.cal, fontSize: 12.5, cursor: "pointer", fontFamily: FONT, padding: "4px 0 0" }}>重試</button>
+                        </div>
+                      )}
                       {it.status === "done" && (
                         <>
                           <div style={{ fontSize: 14, fontWeight: 600, color: C.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{isFood ? it.data.food_name : it.data.activity}</div>
