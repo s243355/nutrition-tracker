@@ -1,6 +1,9 @@
 // Vercel Serverless Function — Anthropic API 中介(保護金鑰)
 // 需要環境變數:ANTHROPIC_API_KEY
-export const config = { maxDuration: 60 }; // 上網搜尋可能較久
+export const config = {
+  maxDuration: 60, // 上網搜尋可能較久
+  api: { bodyParser: { sizeLimit: "10mb" } }, // 照片 base64 較大,放寬上限
+};
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "method not allowed" });
   const key = process.env.ANTHROPIC_API_KEY;
